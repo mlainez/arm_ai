@@ -3079,3 +3079,133 @@ pub fn reduce_axis_f32(op: &str, input: &[f32], n_outer: usize, inner: usize) ->
 
     Ok(out)
 }
+
+// ---------------------------------------------------------------
+// Int4 packed weights (GGUF Q4_0-style, group_size = 32).
+//
+// Storage: per output channel, K must be a multiple of 32. The K-axis
+// is split into groups of 32. Per group we store:
+//   * 16 packed bytes (two int4 weights per byte, low nibble = even k)
+//   * 1 f32 scale (single one, no zero-point: symmetric quant)
+//
+// Packed layout (passed in two slices):
+//   * `w_packed`: shape `[N, K/2]` u8 row-major. Within a row, byte at
+//     column 2*g + 0..15 holds the 16 packed bytes for group g.
+//   * `scales`:    shape `[N, K/32]` f32 row-major.
+//
+// Decoded weight value: `(nibble - 8) * scale_for_group`, where the
+// low nibble is the smaller k index and the high nibble is the next.
+// Range per weight: [-8, 7] · scale.
+//
+// Activations stay f32. M=1 (vector) is the common LLM forward case,
+// but the loop handles general M.
+// ---------------------------------------------------------------
+
+/// Int4 GEMM: `A (M, K) f32` × `W^T (K, N) int4-packed` → `Y (M, N) f32`.
+/// The weight matrix is stored output-major (one block of int4 weights
+/// per output channel) which matches the GGUF Q4_0 layout and is the
+/// natural fit for the inner reduction.
+///
+/// `group_size = 32` is the GGUF Q4_0 standard. K must be a multiple
+/// of 32.
+pub fn int4_matmul_f32(
+    a: &[f32],
+    w_packed: &[u8],
+    w_scales: &[f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<Vec<f32>, String> {
+    const GROUP: usize = 32;
+    if k % GROUP != 0 {
+        return Err(format!("int4_matmul: K={} must be multiple of {}", k, GROUP));
+    }
+    let n_groups = k / GROUP;
+    let bytes_per_row = k / 2;
+    if a.len() != m * k {
+        return Err(format!("int4_matmul: a len {} != M*K = {}", a.len(), m * k));
+    }
+    if w_packed.len() != n * bytes_per_row {
+        return Err(format!(
+            "int4_matmul: packed len {} != N*K/2 = {}",
+            w_packed.len(),
+            n * bytes_per_row
+        ));
+    }
+    if w_scales.len() != n * n_groups {
+        return Err(format!(
+            "int4_matmul: scales len {} != N*K/32 = {}",
+            w_scales.len(),
+            n * n_groups
+        ));
+    }
+
+    let mut out = vec![0.0f32; m * n];
+
+    for mi in 0..m {
+        let a_row = &a[mi * k..(mi + 1) * k];
+        for ni in 0..n {
+            let w_row = &w_packed[ni * bytes_per_row..(ni + 1) * bytes_per_row];
+            let s_row = &w_scales[ni * n_groups..(ni + 1) * n_groups];
+
+            let mut acc = 0.0f32;
+            for g in 0..n_groups {
+                let scale = s_row[g];
+                let mut group_acc = 0.0f32;
+                let group_byte_base = g * (GROUP / 2);
+                let group_k_base = g * GROUP;
+                for j in 0..(GROUP / 2) {
+                    let byte = w_row[group_byte_base + j];
+                    let lo = (byte & 0x0F) as i32 - 8;
+                    let hi = ((byte >> 4) & 0x0F) as i32 - 8;
+                    let a_lo = a_row[group_k_base + 2 * j];
+                    let a_hi = a_row[group_k_base + 2 * j + 1];
+                    group_acc += a_lo * lo as f32 + a_hi * hi as f32;
+                }
+                acc += group_acc * scale;
+            }
+            out[mi * n + ni] = acc;
+        }
+    }
+
+    Ok(out)
+}
+
+/// Quantise an `(N, K)` f32 weight matrix to GGUF Q4_0-style format.
+/// Returns `(packed_bytes, scales)`. Pure scalar code — model-loading
+/// path, not in the inner loop. Convenient for tests; in production
+/// you'd quantise once at SafeTensors load time.
+pub fn quantize_int4_q4_0(w: &[f32], n: usize, k: usize) -> Result<(Vec<u8>, Vec<f32>), String> {
+    const GROUP: usize = 32;
+    if k % GROUP != 0 {
+        return Err(format!("quantize_int4: K={} must be multiple of {}", k, GROUP));
+    }
+    if w.len() != n * k {
+        return Err(format!("quantize_int4: w len {} != N*K = {}", w.len(), n * k));
+    }
+    let n_groups = k / GROUP;
+    let mut packed = vec![0u8; n * (k / 2)];
+    let mut scales = vec![0.0f32; n * n_groups];
+
+    for ni in 0..n {
+        for g in 0..n_groups {
+            let group = &w[ni * k + g * GROUP..ni * k + (g + 1) * GROUP];
+            // Symmetric: scale so that max(|x|) maps to 7 (the largest
+            // positive int4). Range [-8, 7] is asymmetric so we lose
+            // ~1 LSB on the negative side; matches GGUF Q4_0.
+            let max_abs = group.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+            let scale = if max_abs > 0.0 { max_abs / 7.0 } else { 1.0 };
+            scales[ni * n_groups + g] = scale;
+            for j in 0..(GROUP / 2) {
+                let x_lo = group[2 * j] / scale;
+                let x_hi = group[2 * j + 1] / scale;
+                let q_lo = (x_lo.round() as i32).clamp(-8, 7) + 8;
+                let q_hi = (x_hi.round() as i32).clamp(-8, 7) + 8;
+                packed[ni * (k / 2) + g * (GROUP / 2) + j] =
+                    ((q_hi as u8) << 4) | (q_lo as u8);
+            }
+        }
+    }
+
+    Ok((packed, scales))
+}

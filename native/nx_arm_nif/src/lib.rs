@@ -199,6 +199,62 @@ fn int8_matmul_f32_op<'a>(
     f32_vec_to_bin(env, &out)
 }
 
+/// Int4 (Q4_0) matmul: f32 activations × packed int4 weights with
+/// per-group (group_size=32) f32 scales. Returns f32 outputs.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn int4_matmul_f32_op<'a>(
+    env: Env<'a>,
+    a: rustler::Binary<'a>,
+    w_packed: rustler::Binary<'a>,
+    w_scales: rustler::Binary<'a>,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let a_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(a.as_ptr() as *const f32, m * k)
+    };
+    let w_packed_slice: &[u8] = unsafe {
+        std::slice::from_raw_parts(w_packed.as_ptr(), n * (k / 2))
+    };
+    let w_scales_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(w_scales.as_ptr() as *const f32, n * (k / 32))
+    };
+
+    let out = shape_ops::int4_matmul_f32(a_slice, w_packed_slice, w_scales_slice, m, n, k)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+/// Quantize an (N, K) f32 weight matrix to Q4_0 packed int4. Returns
+/// {packed_bytes_binary, scales_binary}. K must be a multiple of 32.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn quantize_int4_q4_0_op<'a>(
+    env: Env<'a>,
+    w: rustler::Binary<'a>,
+    n: usize,
+    k: usize,
+) -> NifResult<(rustler::Binary<'a>, rustler::Binary<'a>)> {
+    let w_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(w.as_ptr() as *const f32, n * k)
+    };
+    let (packed, scales) = shape_ops::quantize_int4_q4_0(w_slice, n, k)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+
+    let mut packed_bin = OwnedBinary::new(packed.len())
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    packed_bin.as_mut_slice().copy_from_slice(&packed);
+
+    let scales_bytes = unsafe {
+        std::slice::from_raw_parts(scales.as_ptr() as *const u8, scales.len() * 4)
+    };
+    let mut scales_bin = OwnedBinary::new(scales.len() * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    scales_bin.as_mut_slice().copy_from_slice(scales_bytes);
+
+    Ok((packed_bin.release(env), scales_bin.release(env)))
+}
+
 /// Weight-only int8 matmul: f32 acts × int8 weights × f32 per-row
 /// scales. Layout matches batched_matmul_f32 with `right_transposed=true`
 /// (acts and weights both contract on last axis).

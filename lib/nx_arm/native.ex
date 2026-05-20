@@ -317,6 +317,25 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Int4 (GGUF Q4_0 style) matmul: f32 activations × packed int4
+  weights with per-group (group_size=32) f32 scales. Weight binary
+  layout: `[N, K/2]` packed bytes (low nibble = even k); scales
+  layout: `[N, K/32]` f32 LE. Returns f32 output `[M, N]`.
+  """
+  @spec int4_matmul_f32_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  def int4_matmul_f32_op(_a, _w_packed, _w_scales, _m, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Quantize an `(N, K)` f32 weight matrix to Q4_0 packed int4 +
+  scales. K must be a multiple of 32. Returns `{packed_bin,
+  scales_bin}`.
+  """
+  @spec quantize_int4_q4_0_op(binary(), non_neg_integer(), non_neg_integer()) :: {binary(), binary()}
+  def quantize_int4_q4_0_op(_w, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Weight-only int8 matmul: f32 activations × int8 weights × f32 per-row
   scales. Returns f32 output. Layout matches batched_matmul_f32 with
   `right_transposed = true` (acts {B,M,K} × weights {N,K} → out {B,M,N}).

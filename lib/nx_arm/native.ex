@@ -140,6 +140,21 @@ defmodule NxArm.Native do
   def elementwise_unary_f32_op(_op, _a), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Flash Attention V1 forward. Fused Q@K^T → scale → softmax → @V
+  with streaming softmax — never materialises the (Sq, Sk) attention
+  matrix.
+
+    * `q`, `k`, `v` — `{B, H, S, D}` raw f32 LE bytes
+    * `scale` — typically `1 / sqrt(D)`
+    * `causal` — boolean, causal LM masking
+
+  Output `{B, H, Sq, D}` raw f32 LE bytes.
+  """
+  @spec flash_attention_f32_op(binary(), binary(), binary(), float(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer(), boolean()) :: binary()
+  def flash_attention_f32_op(_q, _k, _v, _scale, _b, _h, _sq, _sk, _d, _causal),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Fused linear: `out = act @ w^T + bias`. `bias` may be empty for
   no-bias linear. `activation` is one of `"none" | "relu" | "relu6"
   | "gelu" | "sigmoid" | "tanh"` (chained in the same pass).

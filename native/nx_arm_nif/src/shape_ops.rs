@@ -954,6 +954,113 @@ unsafe fn dot4_neon(a: *const f32, b: *const f32, k: usize) -> f32 {
 /// Bumblebee MLP / projection pattern — saves ~60–170 ms per call
 /// vs going through `Nx.broadcast` (whose wrapper has substantial
 /// per-call overhead for hot-loop callers).
+/// Flash Attention V1 forward pass — fused Q @ K^T → softmax → @V
+/// without materialising the {Sq, Sk} attention-score matrix. Tiled
+/// by query blocks; per block we stream over keys, maintaining the
+/// online softmax stats (running max + sum) plus the partial output.
+///
+///   q, k, v : {B, H, S, D} — Q/K/V tensors after head split
+///   scale   : typically 1 / sqrt(D)
+///   causal  : if true, mask upper-triangular positions (sj > sq)
+///
+/// Output shape: {B, H, Sq, D}. For ViT (Sq=Sk=197) this gives the
+/// same numeric result as `softmax(Q@K^T · scale) @ V` but avoids
+/// the (Sq × Sk) memory traffic. For long-context LLMs the savings
+/// are massive.
+pub fn flash_attention_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    scale: f32,
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+    causal: bool,
+) -> Result<Vec<f32>, String> {
+    if q.len() != b * h * sq * d {
+        return Err(format!("flash_attn: q len {} != B*H*Sq*D = {}", q.len(), b * h * sq * d));
+    }
+    if k.len() != b * h * sk * d {
+        return Err(format!("flash_attn: k len {} != B*H*Sk*D = {}", k.len(), b * h * sk * d));
+    }
+    if v.len() != b * h * sk * d {
+        return Err(format!("flash_attn: v len {} != B*H*Sk*D = {}", v.len(), b * h * sk * d));
+    }
+
+    let mut out = vec![0.0f32; b * h * sq * d];
+
+    use rayon::prelude::*;
+    // Parallelise across (batch, head). Each thread does the full Sq
+    // × Sk × D attention for its head.
+    (0..(b * h)).into_par_iter().for_each(|bh| {
+        let batch = bh / h;
+        let head = bh % h;
+
+        let q_base = (batch * h + head) * sq * d;
+        let k_base = (batch * h + head) * sk * d;
+        let v_base = (batch * h + head) * sk * d;
+        let out_base = (batch * h + head) * sq * d;
+
+        for i in 0..sq {
+            // Streaming softmax state per query row.
+            let mut m = f32::NEG_INFINITY;
+            let mut l = 0.0f32;
+            let mut o = vec![0.0f32; d];
+
+            // Causal: only sj ≤ i contribute.
+            let sk_limit = if causal { i + 1 } else { sk };
+
+            for j in 0..sk_limit {
+                // Compute s_ij = Q[i] · K[j] * scale
+                let q_off = q_base + i * d;
+                let k_off = k_base + j * d;
+                let mut s = 0.0f32;
+                for x in 0..d {
+                    s += q[q_off + x] * k[k_off + x];
+                }
+                s *= scale;
+
+                // Online softmax + output accumulation.
+                if s > m {
+                    let m_new = s;
+                    // Rescale existing partial.
+                    let factor = (m - m_new).exp();
+                    let one = 1.0_f32;
+                    for x in 0..d {
+                        o[x] = o[x] * factor + one * v[v_base + j * d + x];
+                    }
+                    l = l * factor + 1.0;
+                    m = m_new;
+                } else {
+                    let p = (s - m).exp();
+                    for x in 0..d {
+                        o[x] += p * v[v_base + j * d + x];
+                    }
+                    l += p;
+                }
+            }
+
+            // Normalise.
+            let inv_l = if l > 0.0 { 1.0 / l } else { 0.0 };
+            let out_off = out_base + i * d;
+            // SAFETY: each (batch, head, sq_row) writes a disjoint
+            // d-element block of `out`; threads partition by bh and
+            // serial-iterate over rows within. The cast to *mut is
+            // safe because we're the unique writer for this slice.
+            unsafe {
+                let dst = out.as_ptr() as *mut f32;
+                for x in 0..d {
+                    *dst.add(out_off + x) = o[x] * inv_l;
+                }
+            }
+        }
+    });
+
+    Ok(out)
+}
+
 /// Fused linear layer: `out[b, m, n] = sum_k act[b, m, k] * w[n, k] + bias[n]`.
 /// Equivalent to `batched_matmul_f32(_, _, _, _, _, _, true)` followed by
 /// bias-add along the last axis, but done in one pass. Saves one alloc +

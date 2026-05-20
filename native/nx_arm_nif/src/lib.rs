@@ -436,6 +436,31 @@ fn scalar_binary_f32_op<'a>(
     Ok(bin.release(env))
 }
 
+/// Flash Attention V1 forward — fused Q@K^T → softmax → @V without
+/// materialising the (Sq, Sk) attention matrix.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn flash_attention_f32_op<'a>(
+    env: Env<'a>,
+    q: rustler::Binary<'a>,
+    k: rustler::Binary<'a>,
+    v: rustler::Binary<'a>,
+    scale: f64,
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+    causal: bool,
+) -> NifResult<rustler::Binary<'a>> {
+    let q_slice: &[f32] = unsafe { std::slice::from_raw_parts(q.as_ptr() as *const f32, b * h * sq * d) };
+    let k_slice: &[f32] = unsafe { std::slice::from_raw_parts(k.as_ptr() as *const f32, b * h * sk * d) };
+    let v_slice: &[f32] = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const f32, b * h * sk * d) };
+
+    let out = shape_ops::flash_attention_f32(q_slice, k_slice, v_slice, scale as f32, b, h, sq, sk, d, causal)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
 /// Fused linear: `out = act @ w^T + bias`. Optionally chains an
 /// activation in the same pass.
 #[rustler::nif(schedule = "DirtyCpu")]

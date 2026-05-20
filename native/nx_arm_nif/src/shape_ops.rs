@@ -1734,68 +1734,71 @@ pub fn elementwise_binary_f32_into(op: &str, a: &[f32], b: &[f32], out: &mut [f3
         return Err(format!("len mismatch: a={} b={} out={}", a.len(), b.len(), out.len()));
     }
     let n = a.len();
-
-    // Parallelise across cores at a coarse granularity. Inside each
-    // chunk a plain `for` loop autovectorises to NEON FMA/ADD on
-    // aarch64 (we don't need explicit intrinsics — the compiler
-    // generates the right code for tight in-order f32 arithmetic).
     let chunk = ((n + 7) / 8).max(8192).min(n.max(1));
 
+    // Explicit NEON intrinsics for ops with a single-instruction NEON
+    // primitive. The autovectoriser handles these decently when the
+    // loop body is tight scalar arithmetic, but `vld1q + vop + vst1q`
+    // produces tighter code (no bounds-check noise, 4 floats / cycle
+    // guaranteed). Falls back to scalar tail for n%4.
+    macro_rules! neon_op {
+        ($vop:ident, $sop:expr) => {{
+            #[cfg(target_arch = "aarch64")]
+            {
+                out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
+                    let s = i * chunk;
+                    let len = slot.len();
+                    let n_vec = len / 4;
+                    let n_tail = n_vec * 4;
+                    unsafe {
+                        use core::arch::aarch64::*;
+                        for j in 0..n_vec {
+                            let av = vld1q_f32(a.as_ptr().add(s + j * 4));
+                            let bv = vld1q_f32(b.as_ptr().add(s + j * 4));
+                            let r = $vop(av, bv);
+                            vst1q_f32(slot.as_mut_ptr().add(j * 4), r);
+                        }
+                    }
+                    for j in n_tail..len {
+                        slot[j] = $sop(a[s + j], b[s + j]);
+                    }
+                });
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
+                    let s = i * chunk;
+                    for j in 0..slot.len() {
+                        slot[j] = $sop(a[s + j], b[s + j]);
+                    }
+                });
+            }
+        }};
+    }
+
+    // Scalar fallback (for ops without a single NEON instruction:
+    // pow, atan2, remainder, divide on older NEON without vdivq).
+    macro_rules! scalar_op {
+        ($body:expr) => {{
+            out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
+                let s = i * chunk;
+                for j in 0..slot.len() {
+                    slot[j] = $body(a[s + j], b[s + j]);
+                }
+            });
+        }};
+    }
+
     match op {
-        "add" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j] + b[s + j];
-            }
-        }),
-        "subtract" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j] - b[s + j];
-            }
-        }),
-        "multiply" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j] * b[s + j];
-            }
-        }),
-        "divide" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j] / b[s + j];
-            }
-        }),
-        "max" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j].max(b[s + j]);
-            }
-        }),
-        "min" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j].min(b[s + j]);
-            }
-        }),
-        "pow" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j].powf(b[s + j]);
-            }
-        }),
-        "atan2" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j].atan2(b[s + j]);
-            }
-        }),
-        "remainder" => out.par_chunks_mut(chunk).enumerate().for_each(|(i, slot)| {
-            let s = i * chunk;
-            for j in 0..slot.len() {
-                slot[j] = a[s + j].rem_euclid(b[s + j]);
-            }
-        }),
+        "add" => neon_op!(vaddq_f32, |x: f32, y: f32| x + y),
+        "subtract" => neon_op!(vsubq_f32, |x: f32, y: f32| x - y),
+        "multiply" => neon_op!(vmulq_f32, |x: f32, y: f32| x * y),
+        "divide" => neon_op!(vdivq_f32, |x: f32, y: f32| x / y),
+        "max" => neon_op!(vmaxq_f32, |x: f32, y: f32| x.max(y)),
+        "min" => neon_op!(vminq_f32, |x: f32, y: f32| x.min(y)),
+        "pow" => scalar_op!(|x: f32, y: f32| x.powf(y)),
+        "atan2" => scalar_op!(|x: f32, y: f32| x.atan2(y)),
+        "remainder" => scalar_op!(|x: f32, y: f32| x.rem_euclid(y)),
         other => return Err(format!("unknown binary op: {}", other)),
     }
 

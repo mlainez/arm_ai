@@ -1126,6 +1126,42 @@ fn conv2d_f32_winograd_3x3_op<'a>(
     Ok(out_bin.release(env))
 }
 
+// ---------------------------------------------------------------
+// E3: rayon thread pool tuning.
+//
+// Rayon's global pool is sized to logical core count on first use.
+// On Cortex-A73 (4 cores) this is fine; on big.LITTLE chips you
+// typically want to pin to the perf cluster or cap below the total.
+//
+// `init_thread_pool_op(n)` calls ThreadPoolBuilder::build_global with
+// the requested thread count. Must be called before any rayon
+// par_iter touches the global pool (i.e. at app boot, before any
+// matmul). Returns `:ok` on first call, `:already_initialised`
+// otherwise (rayon's global pool is one-shot).
+//
+// `current_thread_count_op/0` always reports the active pool size.
+// ---------------------------------------------------------------
+
+#[rustler::nif]
+fn init_thread_pool_op(n: usize) -> rustler::Atom {
+    let res = rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build_global();
+    match res {
+        Ok(_) => atoms::ok(),
+        Err(_) => atoms::already_initialised(),
+    }
+}
+
+#[rustler::nif]
+fn current_thread_count_op() -> usize {
+    rayon::current_num_threads()
+}
+
+mod atoms {
+    rustler::atoms! { ok, already_initialised }
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn mmap_open_op(path: String) -> NifResult<(ResourceArc<MmapResource>, usize)> {
     let file = std::fs::File::open(&path)

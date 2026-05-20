@@ -364,6 +364,21 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Initialise the rayon global thread pool with `n` threads. Returns
+  `:ok` on first call, `:already_initialised` if rayon has already
+  started (the pool is one-shot at process startup). Call from
+  application start callback before any parallel work runs.
+  """
+  @spec init_thread_pool_op(pos_integer()) :: :ok | :already_initialised
+  def init_thread_pool_op(_n),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Reports the number of threads in the active rayon pool."
+  @spec current_thread_count_op() :: pos_integer()
+  def current_thread_count_op,
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Quantize an `(N, K)` f32 weight matrix to Q4_0 packed int4 +
   scales. K must be a multiple of 32. Returns `{packed_bin,
   scales_bin}`.

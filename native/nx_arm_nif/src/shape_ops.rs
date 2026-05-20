@@ -607,13 +607,13 @@ unsafe fn dot4_neon(a: *const f32, b: *const f32, k: usize) -> f32 {
 
 // ── f32 elementwise (CPU NEON via auto-vectoriser) ──────
 
-/// Same-shape elementwise binary op on f32 arrays.
-pub fn elementwise_binary_f32(op: &str, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
-    if a.len() != b.len() {
-        return Err(format!("len mismatch: {} vs {}", a.len(), b.len()));
+/// Same-shape elementwise binary op on f32 arrays. Writes directly
+/// into the caller-provided `out` slice — no Vec<f32> intermediate.
+pub fn elementwise_binary_f32_into(op: &str, a: &[f32], b: &[f32], out: &mut [f32]) -> Result<(), String> {
+    if a.len() != b.len() || out.len() != a.len() {
+        return Err(format!("len mismatch: a={} b={} out={}", a.len(), b.len(), out.len()));
     }
     let n = a.len();
-    let mut out = vec![0.0f32; n];
 
     // Parallelise across cores at a coarse granularity. Inside each
     // chunk a plain `for` loop autovectorises to NEON FMA/ADD on
@@ -679,14 +679,23 @@ pub fn elementwise_binary_f32(op: &str, a: &[f32], b: &[f32]) -> Result<Vec<f32>
         other => return Err(format!("unknown binary op: {}", other)),
     }
 
+    Ok(())
+}
+
+/// Vec-returning wrapper kept for ergonomic callers. Internally just
+/// allocates a Vec and calls _into.
+pub fn elementwise_binary_f32(op: &str, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
+    let mut out = vec![0.0f32; a.len()];
+    elementwise_binary_f32_into(op, a, b, &mut out)?;
     Ok(out)
 }
 
-/// Scalar-broadcast binary op: `tensor OP scalar` (`side == "ab"`) or
-/// `scalar OP tensor` (`side == "ba"`).
-pub fn scalar_binary_f32(op: &str, side: &str, a: &[f32], scalar: f32) -> Result<Vec<f32>, String> {
+/// Scalar-broadcast binary op writing directly into `out`.
+pub fn scalar_binary_f32_into(op: &str, side: &str, a: &[f32], scalar: f32, out: &mut [f32]) -> Result<(), String> {
     let n = a.len();
-    let mut out = vec![0.0f32; n];
+    if out.len() != n {
+        return Err(format!("scalar_binary out len {} != a len {}", out.len(), n));
+    }
     let chunk = ((n + 7) / 8).max(8192).min(n.max(1));
 
     macro_rules! run {
@@ -728,13 +737,21 @@ pub fn scalar_binary_f32(op: &str, side: &str, a: &[f32], scalar: f32) -> Result
         (other, _) => return Err(format!("unknown scalar op: {}", other)),
     }
 
+    Ok(())
+}
+
+pub fn scalar_binary_f32(op: &str, side: &str, a: &[f32], scalar: f32) -> Result<Vec<f32>, String> {
+    let mut out = vec![0.0f32; a.len()];
+    scalar_binary_f32_into(op, side, a, scalar, &mut out)?;
     Ok(out)
 }
 
-/// Elementwise unary op on f32 array.
-pub fn elementwise_unary_f32(op: &str, a: &[f32]) -> Result<Vec<f32>, String> {
+/// Elementwise unary op writing directly into `out`.
+pub fn elementwise_unary_f32_into(op: &str, a: &[f32], out: &mut [f32]) -> Result<(), String> {
     let n = a.len();
-    let mut out = vec![0.0f32; n];
+    if out.len() != n {
+        return Err(format!("unary out len {} != a len {}", out.len(), n));
+    }
     let chunk = ((n + 7) / 8).max(8192).min(n.max(1));
 
     macro_rules! run {
@@ -780,6 +797,12 @@ pub fn elementwise_unary_f32(op: &str, a: &[f32]) -> Result<Vec<f32>, String> {
         other => return Err(format!("unknown unary op: {}", other)),
     }
 
+    Ok(())
+}
+
+pub fn elementwise_unary_f32(op: &str, a: &[f32]) -> Result<Vec<f32>, String> {
+    let mut out = vec![0.0f32; a.len()];
+    elementwise_unary_f32_into(op, a, &mut out)?;
     Ok(out)
 }
 

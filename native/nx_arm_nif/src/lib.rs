@@ -142,9 +142,18 @@ fn elementwise_binary_f32_op<'a>(
     let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, n) };
     let b_slice: &[f32] =
         unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f32, b.len() / 4) };
-    let out = shape_ops::elementwise_binary_f32(&op, a_slice, b_slice)
-        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
-    f32_vec_to_bin(env, &out)
+
+    // Write directly into the OwnedBinary — skip the Vec<f32> →
+    // OwnedBinary memcpy that adds ~50–100 µs per call.
+    let mut bin = OwnedBinary::new(n * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    {
+        let out_slice: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(bin.as_mut_slice().as_mut_ptr() as *mut f32, n) };
+        shape_ops::elementwise_binary_f32_into(&op, a_slice, b_slice, out_slice)
+            .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    }
+    Ok(bin.release(env))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -155,11 +164,18 @@ fn scalar_binary_f32_op<'a>(
     a: rustler::Binary<'a>,
     scalar: f64,
 ) -> NifResult<rustler::Binary<'a>> {
+    let n = a.len() / 4;
     let a_slice: &[f32] =
-        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, a.len() / 4) };
-    let out = shape_ops::scalar_binary_f32(&op, &side, a_slice, scalar as f32)
-        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
-    f32_vec_to_bin(env, &out)
+        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, n) };
+    let mut bin = OwnedBinary::new(n * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    {
+        let out_slice: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(bin.as_mut_slice().as_mut_ptr() as *mut f32, n) };
+        shape_ops::scalar_binary_f32_into(&op, &side, a_slice, scalar as f32, out_slice)
+            .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    }
+    Ok(bin.release(env))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -168,11 +184,18 @@ fn elementwise_unary_f32_op<'a>(
     op: String,
     a: rustler::Binary<'a>,
 ) -> NifResult<rustler::Binary<'a>> {
+    let n = a.len() / 4;
     let a_slice: &[f32] =
-        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, a.len() / 4) };
-    let out = shape_ops::elementwise_unary_f32(&op, a_slice)
-        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
-    f32_vec_to_bin(env, &out)
+        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, n) };
+    let mut bin = OwnedBinary::new(n * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    {
+        let out_slice: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(bin.as_mut_slice().as_mut_ptr() as *mut f32, n) };
+        shape_ops::elementwise_unary_f32_into(&op, a_slice, out_slice)
+            .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    }
+    Ok(bin.release(env))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]

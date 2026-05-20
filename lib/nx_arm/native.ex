@@ -219,6 +219,15 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Winograd F(2, 3) convolution for 3×3 stride-1 NHWC. Weight layout
+  `{Cout, 3, 3, Cin}` raw f32 LE. `dims` is `[N, H_in, W_in, Cin,
+  Cout]`; `padding` is `[pad_top, pad_bottom, pad_left, pad_right]`.
+  """
+  @spec conv2d_f32_winograd_3x3_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()]) :: binary()
+  def conv2d_f32_winograd_3x3_op(_input, _weight, _bias, _dims, _padding),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Depthwise 2-D conv (feature_group_size == Cin). Kernel laid out as
   `{Cin, Kh, Kw}` raw f32 LE. NHWC input + NHWC output. Used by
   MobileNet/EfficientNet's per-channel spatial filter blocks.

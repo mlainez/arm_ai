@@ -320,6 +320,281 @@ pub fn conv2d_f32(
 /// f32 ⋅ f32 row dot. NEON path processes 8 f32 per iteration via two
 /// vfmaq_f32 calls. Scalar fallback for non-aarch64 hosts.
 #[inline(always)]
+/// Winograd F(2, 3) convolution: 3×3 stride-1 conv via the 16-multiply
+/// transform-based algorithm. Halves MAC count vs direct conv at the
+/// cost of extra add/sub work. NHWC layout, processes output in 2×2
+/// tiles.
+///
+/// For a 3×3 conv producing an O×O output, direct convolution does
+/// 9·O² multiplies per channel pair. Winograd F(2,3) groups outputs
+/// into 2×2 tiles and produces each tile with 16 multiplies — 16/(2²·9)
+/// = 0.44× the multiplies, a 56% reduction. Extra add/sub work brings
+/// realised speedup to ~1.5–2× on cache-friendly shapes.
+///
+/// Currently only the math kernel is exposed (`winograd_f23_tile`);
+/// wiring into `backend.conv` is future work guarded by shape
+/// detection (kh==kw==3, sh==sw==1, no dilation).
+pub fn winograd_f23_tile_f32(
+    input_tile: &[f32; 16],
+    kernel_3x3: &[f32; 9],
+    out_tile: &mut [f32; 4],
+) {
+    // Pre-transform the 3×3 kernel to 4×4 (typically done once per
+    // kernel at model load, but we recompute here for the per-tile
+    // function): U = G g G^T where
+    //   G = [[1,    0,    0],
+    //        [1/2,  1/2,  1/2],
+    //        [1/2, -1/2,  1/2],
+    //        [0,    0,    1]]
+    let mut u = [0.0f32; 16];
+    {
+        // G g, shape (4, 3).
+        let mut gg = [0.0f32; 12];
+        for j in 0..3 {
+            let g00 = kernel_3x3[0 * 3 + j];
+            let g10 = kernel_3x3[1 * 3 + j];
+            let g20 = kernel_3x3[2 * 3 + j];
+            gg[0 * 3 + j] = g00;
+            gg[1 * 3 + j] = 0.5 * (g00 + g10 + g20);
+            gg[2 * 3 + j] = 0.5 * (g00 - g10 + g20);
+            gg[3 * 3 + j] = g20;
+        }
+        // (G g) G^T, shape (4, 4).
+        for i in 0..4 {
+            let r0 = gg[i * 3 + 0];
+            let r1 = gg[i * 3 + 1];
+            let r2 = gg[i * 3 + 2];
+            u[i * 4 + 0] = r0;
+            u[i * 4 + 1] = 0.5 * (r0 + r1 + r2);
+            u[i * 4 + 2] = 0.5 * (r0 - r1 + r2);
+            u[i * 4 + 3] = r2;
+        }
+    }
+
+    // Transform the 4×4 input tile: V = B^T d B where
+    //   B^T = [[ 1,  0, -1,  0],
+    //          [ 0,  1,  1,  0],
+    //          [ 0, -1,  1,  0],
+    //          [ 0,  1,  0, -1]]
+    let mut v = [0.0f32; 16];
+    {
+        // B^T d
+        let mut btd = [0.0f32; 16];
+        for j in 0..4 {
+            let d0 = input_tile[0 * 4 + j];
+            let d1 = input_tile[1 * 4 + j];
+            let d2 = input_tile[2 * 4 + j];
+            let d3 = input_tile[3 * 4 + j];
+            btd[0 * 4 + j] = d0 - d2;
+            btd[1 * 4 + j] = d1 + d2;
+            btd[2 * 4 + j] = -d1 + d2;
+            btd[3 * 4 + j] = d1 - d3;
+        }
+        // (B^T d) B
+        for i in 0..4 {
+            let r0 = btd[i * 4 + 0];
+            let r1 = btd[i * 4 + 1];
+            let r2 = btd[i * 4 + 2];
+            let r3 = btd[i * 4 + 3];
+            v[i * 4 + 0] = r0 - r2;
+            v[i * 4 + 1] = r1 + r2;
+            v[i * 4 + 2] = -r1 + r2;
+            v[i * 4 + 3] = r1 - r3;
+        }
+    }
+
+    // Element-wise multiply U ⊙ V (16 multiplies — the speedup
+    // happens here vs the 36 of direct conv).
+    let mut m = [0.0f32; 16];
+    for i in 0..16 {
+        m[i] = u[i] * v[i];
+    }
+
+    // Inverse transform: Y = A^T M A, with
+    //   A^T = [[1, 1,  1,  0],
+    //          [0, 1, -1, -1]]
+    // Result is 2×2.
+    let mut atm = [0.0f32; 8];
+    for j in 0..4 {
+        let m0 = m[0 * 4 + j];
+        let m1 = m[1 * 4 + j];
+        let m2 = m[2 * 4 + j];
+        let m3 = m[3 * 4 + j];
+        atm[0 * 4 + j] = m0 + m1 + m2;
+        atm[1 * 4 + j] = m1 - m2 - m3;
+    }
+    for i in 0..2 {
+        let r0 = atm[i * 4 + 0];
+        let r1 = atm[i * 4 + 1];
+        let r2 = atm[i * 4 + 2];
+        let r3 = atm[i * 4 + 3];
+        out_tile[i * 2 + 0] = r0 + r1 + r2;
+        out_tile[i * 2 + 1] = r1 - r2 - r3;
+    }
+}
+
+/// Full 3×3 stride-1 NHWC convolution via Winograd F(2, 3) tiles.
+/// Input layout (N, H, W, C_in), weight layout (C_out, 3, 3, C_in),
+/// output layout (N, H_out, W_out, C_out). H_out and W_out come from
+/// the standard formula with stride 1, dilation 1.
+///
+/// Output is produced in 2×2 tiles; rows/columns past the true
+/// output are trimmed at write time, so any H_out × W_out is fine.
+pub fn conv2d_f32_winograd_3x3(
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    n: usize,
+    h_in: usize,
+    w_in: usize,
+    c_in: usize,
+    c_out: usize,
+    pad_top: usize,
+    pad_bottom: usize,
+    pad_left: usize,
+    pad_right: usize,
+) {
+    let h_out = h_in + pad_top + pad_bottom - 2;
+    let w_out = w_in + pad_left + pad_right - 2;
+
+    // Pre-transform all weights G g G^T into U[c_out, c_in, 16].
+    let mut u_all = vec![0.0f32; c_out * c_in * 16];
+    for oc in 0..c_out {
+        for ic in 0..c_in {
+            let mut g = [0.0f32; 9];
+            for ky in 0..3 {
+                for kx in 0..3 {
+                    g[ky * 3 + kx] = weight[((oc * 3 + ky) * 3 + kx) * c_in + ic];
+                }
+            }
+            // G g, shape (4, 3).
+            let mut gg = [0.0f32; 12];
+            for j in 0..3 {
+                let g0 = g[0 * 3 + j];
+                let g1 = g[1 * 3 + j];
+                let g2 = g[2 * 3 + j];
+                gg[0 * 3 + j] = g0;
+                gg[1 * 3 + j] = 0.5 * (g0 + g1 + g2);
+                gg[2 * 3 + j] = 0.5 * (g0 - g1 + g2);
+                gg[3 * 3 + j] = g2;
+            }
+            // (G g) G^T, shape (4, 4).
+            let base = (oc * c_in + ic) * 16;
+            for i in 0..4 {
+                let r0 = gg[i * 3 + 0];
+                let r1 = gg[i * 3 + 1];
+                let r2 = gg[i * 3 + 2];
+                u_all[base + i * 4 + 0] = r0;
+                u_all[base + i * 4 + 1] = 0.5 * (r0 + r1 + r2);
+                u_all[base + i * 4 + 2] = 0.5 * (r0 - r1 + r2);
+                u_all[base + i * 4 + 3] = r2;
+            }
+        }
+    }
+
+    let n_th = (h_out + 1) / 2;
+    let n_tw = (w_out + 1) / 2;
+
+    for nn in 0..n {
+        for th in 0..n_th {
+            for tw in 0..n_tw {
+                let oh0 = th * 2;
+                let ow0 = tw * 2;
+
+                let mut acc_oc = vec![[0.0f32; 4]; c_out];
+
+                for ic in 0..c_in {
+                    // Gather 4×4 input tile with zero-padding.
+                    let mut d = [0.0f32; 16];
+                    for i in 0..4 {
+                        let ih = oh0 as isize + i as isize - pad_top as isize;
+                        if ih < 0 || (ih as usize) >= h_in {
+                            continue;
+                        }
+                        let ih_u = ih as usize;
+                        for j in 0..4 {
+                            let iw = ow0 as isize + j as isize - pad_left as isize;
+                            if iw < 0 || (iw as usize) >= w_in {
+                                continue;
+                            }
+                            let iw_u = iw as usize;
+                            let idx = ((nn * h_in + ih_u) * w_in + iw_u) * c_in + ic;
+                            d[i * 4 + j] = input[idx];
+                        }
+                    }
+
+                    // V = B^T d B.
+                    let mut v = [0.0f32; 16];
+                    let mut btd = [0.0f32; 16];
+                    for j in 0..4 {
+                        let d0 = d[0 * 4 + j];
+                        let d1 = d[1 * 4 + j];
+                        let d2 = d[2 * 4 + j];
+                        let d3 = d[3 * 4 + j];
+                        btd[0 * 4 + j] = d0 - d2;
+                        btd[1 * 4 + j] = d1 + d2;
+                        btd[2 * 4 + j] = -d1 + d2;
+                        btd[3 * 4 + j] = d1 - d3;
+                    }
+                    for i in 0..4 {
+                        let r0 = btd[i * 4 + 0];
+                        let r1 = btd[i * 4 + 1];
+                        let r2 = btd[i * 4 + 2];
+                        let r3 = btd[i * 4 + 3];
+                        v[i * 4 + 0] = r0 - r2;
+                        v[i * 4 + 1] = r1 + r2;
+                        v[i * 4 + 2] = -r1 + r2;
+                        v[i * 4 + 3] = r1 - r3;
+                    }
+
+                    for oc in 0..c_out {
+                        let base = (oc * c_in + ic) * 16;
+                        let u = &u_all[base..base + 16];
+
+                        let mut m = [0.0f32; 16];
+                        for k in 0..16 {
+                            m[k] = u[k] * v[k];
+                        }
+
+                        let mut atm = [0.0f32; 8];
+                        for j in 0..4 {
+                            let m0 = m[0 * 4 + j];
+                            let m1 = m[1 * 4 + j];
+                            let m2 = m[2 * 4 + j];
+                            let m3 = m[3 * 4 + j];
+                            atm[0 * 4 + j] = m0 + m1 + m2;
+                            atm[1 * 4 + j] = m1 - m2 - m3;
+                        }
+                        for i in 0..2 {
+                            let r0 = atm[i * 4 + 0];
+                            let r1 = atm[i * 4 + 1];
+                            let r2 = atm[i * 4 + 2];
+                            let r3 = atm[i * 4 + 3];
+                            acc_oc[oc][i * 2 + 0] += r0 + r1 + r2;
+                            acc_oc[oc][i * 2 + 1] += r1 - r2 - r3;
+                        }
+                    }
+                }
+
+                for oc in 0..c_out {
+                    let b = bias.map(|bs| bs[oc]).unwrap_or(0.0);
+                    for i in 0..2 {
+                        for j in 0..2 {
+                            let oh = oh0 + i;
+                            let ow = ow0 + j;
+                            if oh < h_out && ow < w_out {
+                                let idx = ((nn * h_out + oh) * w_out + ow) * c_out + oc;
+                                output[idx] = acc_oc[oc][i * 2 + j] + b;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Depthwise 2-D convolution. Per channel c in 0..Cin we compute
 ///   `out[n, ho, wo, c] = sum_{kh, kw} input[n, ho*Sh+kh-Pt, wo*Sw+kw-Pl, c]
 ///                                     * kernel[c, kh, kw]`

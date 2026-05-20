@@ -1664,6 +1664,87 @@ pub fn int8_matmul_f32(
     Ok(out)
 }
 
+/// Int8 matmul with per-token (per row of A) activation scales. The
+/// activation tensor is quantised one scale per row (per token in LLM
+/// language) rather than one scale for the whole batch, which keeps
+/// most of the dynamic range when outlier-heavy distributions would
+/// otherwise blow out a single scale.
+///
+/// Dequant: `out[m, n] = act_scales[m] * w_scales[n] * sum_k(a[m,k] · w[n,k])`.
+/// SDOT inner loop is unchanged — the per-row act scale hoists out to
+/// the outer m loop so there's zero added cost per dot product.
+pub fn int8_matmul_f32_per_token(
+    a: &[i8],
+    w: &[i8],
+    act_scales: &[f32],
+    w_scales: &[f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<Vec<f32>, String> {
+    if a.len() != m * k {
+        return Err(format!("int8_matmul_per_token: a len {} != M*K = {}", a.len(), m * k));
+    }
+    if w.len() != n * k {
+        return Err(format!("int8_matmul_per_token: w len {} != N*K = {}", w.len(), n * k));
+    }
+    if w_scales.len() != n {
+        return Err(format!("int8_matmul_per_token: w_scales len {} != N = {}", w_scales.len(), n));
+    }
+    if act_scales.len() != m {
+        return Err(format!("int8_matmul_per_token: act_scales len {} != M = {}", act_scales.len(), m));
+    }
+
+    let mut out = vec![0.0f32; m * n];
+
+    #[cfg(target_arch = "aarch64")]
+    let use_sdot = std::arch::is_aarch64_feature_detected!("dotprod");
+    #[cfg(not(target_arch = "aarch64"))]
+    let use_sdot = false;
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+        let a_row_off = i * k;
+        let row_scale = act_scales[i];
+
+        for j in 0..n {
+            let w_row_off = j * k;
+            let acc_i32 = unsafe { int8_dot(&a[a_row_off..], &w[w_row_off..], k, use_sdot) };
+            row[j] = (acc_i32 as f32) * row_scale * w_scales[j];
+        }
+    });
+
+    Ok(out)
+}
+
+/// Quantise an `(M, K)` f32 activation matrix to `i8` with symmetric
+/// per-token scales. Returns `(quantised_bytes, scales)` where scales
+/// has length M.
+///
+/// Pure scalar Rust; used at the model entry point right after the
+/// embedding lookup. Once the rest of the forward keeps activations
+/// in int8 this gets called once per token rather than once per layer.
+pub fn quantize_int8_per_token(a: &[f32], m: usize, k: usize) -> Result<(Vec<i8>, Vec<f32>), String> {
+    if a.len() != m * k {
+        return Err(format!("quantize_int8_per_token: a len {} != M*K = {}", a.len(), m * k));
+    }
+    let mut out = vec![0i8; m * k];
+    let mut scales = vec![0.0f32; m];
+
+    for mi in 0..m {
+        let row = &a[mi * k..(mi + 1) * k];
+        let max_abs = row.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+        let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
+        scales[mi] = scale;
+        for j in 0..k {
+            let q = (row[j] / scale).round() as i32;
+            out[mi * k + j] = q.clamp(-127, 127) as i8;
+        }
+    }
+
+    Ok((out, scales))
+}
+
 #[cfg(target_arch = "aarch64")]
 unsafe fn int8_dot(a: &[i8], w: &[i8], k: usize, use_sdot: bool) -> i32 {
     use core::arch::aarch64::*;

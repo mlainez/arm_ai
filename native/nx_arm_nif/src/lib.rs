@@ -199,6 +199,67 @@ fn int8_matmul_f32_op<'a>(
     f32_vec_to_bin(env, &out)
 }
 
+/// Int8 matmul with per-token activation scales. act_scales is a
+/// length-M f32 vector.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn int8_matmul_f32_per_token_op<'a>(
+    env: Env<'a>,
+    a: rustler::Binary<'a>,
+    w: rustler::Binary<'a>,
+    act_scales: rustler::Binary<'a>,
+    w_scales: rustler::Binary<'a>,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let a_slice: &[i8] = unsafe { std::slice::from_raw_parts(a.as_ptr() as *const i8, m * k) };
+    let w_slice: &[i8] = unsafe { std::slice::from_raw_parts(w.as_ptr() as *const i8, n * k) };
+    let act_scales_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(act_scales.as_ptr() as *const f32, m)
+    };
+    let w_scales_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(w_scales.as_ptr() as *const f32, n)
+    };
+
+    let out = shape_ops::int8_matmul_f32_per_token(
+        a_slice, w_slice, act_scales_slice, w_scales_slice, m, n, k,
+    )
+    .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+/// Quantize an (M, K) f32 activation matrix to int8 with symmetric
+/// per-token scales. Returns {quantised_bytes, scales_bytes}.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn quantize_int8_per_token_op<'a>(
+    env: Env<'a>,
+    a: rustler::Binary<'a>,
+    m: usize,
+    k: usize,
+) -> NifResult<(rustler::Binary<'a>, rustler::Binary<'a>)> {
+    let a_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(a.as_ptr() as *const f32, m * k)
+    };
+    let (quantised, scales) = shape_ops::quantize_int8_per_token(a_slice, m, k)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+
+    let q_bytes = unsafe {
+        std::slice::from_raw_parts(quantised.as_ptr() as *const u8, quantised.len())
+    };
+    let mut q_bin = OwnedBinary::new(quantised.len())
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    q_bin.as_mut_slice().copy_from_slice(q_bytes);
+
+    let s_bytes = unsafe {
+        std::slice::from_raw_parts(scales.as_ptr() as *const u8, scales.len() * 4)
+    };
+    let mut s_bin = OwnedBinary::new(scales.len() * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    s_bin.as_mut_slice().copy_from_slice(s_bytes);
+
+    Ok((q_bin.release(env), s_bin.release(env)))
+}
+
 /// Int4 (Q4_0) matmul: f32 activations × packed int4 weights with
 /// per-group (group_size=32) f32 scales. Returns f32 outputs.
 #[rustler::nif(schedule = "DirtyCpu")]

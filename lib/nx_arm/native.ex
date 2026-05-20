@@ -327,6 +327,24 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Int8 matmul with per-token activation scales. `act_scales` is a
+  length-M f32 LE binary -- one scale per row of A. Equivalent to
+  `int8_matmul_f32_op` but with per-row dequant, recovering accuracy
+  on outlier-heavy activation distributions.
+  """
+  @spec int8_matmul_f32_per_token_op(binary(), binary(), binary(), binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  def int8_matmul_f32_per_token_op(_a, _w, _act_scales, _w_scales, _m, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Quantize an `(M, K)` f32 activation matrix to int8 with symmetric
+  per-token scales. Returns `{quantised_bin, scales_bin}`.
+  """
+  @spec quantize_int8_per_token_op(binary(), non_neg_integer(), non_neg_integer()) :: {binary(), binary()}
+  def quantize_int8_per_token_op(_a, _m, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Quantize an `(N, K)` f32 weight matrix to Q4_0 packed int4 +
   scales. K must be a multiple of 32. Returns `{packed_bin,
   scales_bin}`.

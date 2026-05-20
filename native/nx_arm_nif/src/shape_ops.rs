@@ -408,7 +408,14 @@ pub fn batched_matmul_f32(
                 matmul_2d_neon_qkt(a_slice, r_slice, c_slice, m, n, k);
             } else {
                 let r_slice = &right[batch * k * n..(batch + 1) * k * n];
-                matmul_2d_neon(a_slice, r_slice, c_slice, m, n, k);
+                // For large K, the per-thread B-panel exceeds L1.
+                // The cache-blocked variant restructures the loops to
+                // keep B-panel slices hot across multiple mi tiles.
+                if k > 256 {
+                    matmul_2d_neon_blocked(a_slice, r_slice, c_slice, m, n, k);
+                } else {
+                    matmul_2d_neon(a_slice, r_slice, c_slice, m, n, k);
+                }
             }
         });
 
@@ -421,6 +428,235 @@ pub fn batched_matmul_f32(
 /// outer loop over row-tiles is rayon-parallel. Edges where M or N
 /// aren't multiples of 4 are handled by scalar fallback for those
 /// remaining cells only.
+/// Cache-blocked 4×8 NEON matmul. Splits K into blocks of `K_BLOCK`
+/// so the B-panel touched per (mi, nj) tile stays in L1 across
+/// multiple mi iterations. Without blocking, on M=197 K=768 N=192
+/// our B-panel (768×8 = 24 KB) was bigger than the per-thread L1
+/// budget on Cortex-A73 and we were paying a cache miss every other
+/// inner step.
+///
+/// Use this for K > 256; below that the unblocked path is fine
+/// (fewer accumulator load/store cycles).
+fn matmul_2d_neon_blocked(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    const K_BLOCK: usize = 128;
+
+    let n_tiles = n / 8;
+    let n_after_8 = n_tiles * 8;
+    let n_tiles_4 = (n - n_after_8) / 4;
+    let n_after_4 = n_after_8 + n_tiles_4 * 4;
+    let m_tiles_count = m / 4;
+    let m_tail_start = m_tiles_count * 4;
+
+    // Initialise C to zero — the accumulating kernel loads existing
+    // C values across K blocks.
+    for x in c.iter_mut() {
+        *x = 0.0;
+    }
+
+    let c_addr = c.as_mut_ptr() as usize;
+
+    // For each K block, parallel-fan over mi tiles; within a thread,
+    // iterate nj tiles. B's K-block slab is read 49 (m_tiles) times
+    // per (kb, nj) but stays hot in L1.
+    for kb_start in (0..k).step_by(K_BLOCK) {
+        let kb_end = (kb_start + K_BLOCK).min(k);
+
+        (0..m_tiles_count).into_par_iter().for_each(|mi| {
+            let row_base = mi * 4;
+            let c_ptr = c_addr as *mut f32;
+            unsafe {
+                for nj in 0..n_tiles {
+                    let col_base = nj * 8;
+                    matmul_kernel_4x8_accum(a, b, c_ptr, row_base, col_base, n, k, kb_start, kb_end);
+                }
+                for nj in 0..n_tiles_4 {
+                    let col_base = n_after_8 + nj * 4;
+                    matmul_kernel_4x4_accum(a, b, c_ptr, row_base, col_base, n, k, kb_start, kb_end);
+                }
+                // N tail (n % 4 cols) — scalar accumulate per K block.
+                for col in n_after_4..n {
+                    for row_off in 0..4 {
+                        let row = row_base + row_off;
+                        let mut acc = 0.0f32;
+                        let a_row = std::slice::from_raw_parts(a.as_ptr().add(row * k), k);
+                        for kk in kb_start..kb_end {
+                            acc += a_row[kk] * b[kk * n + col];
+                        }
+                        *c_ptr.add(row * n + col) += acc;
+                    }
+                }
+            }
+        });
+    }
+
+    // M tail (m % 4 rows) — done once at the end against full K.
+    for row in m_tail_start..m {
+        let a_row = &a[row * k..row * k + k];
+        for col in 0..n {
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += a_row[kk] * b[kk * n + col];
+            }
+            c[row * n + col] = acc;
+        }
+    }
+}
+
+/// 4×8 NEON kernel that ACCUMULATES into existing C values (rather
+/// than initializing from zero). Used by the cache-blocked matmul
+/// across K blocks.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn matmul_kernel_4x8_accum(
+    a: &[f32],
+    b: &[f32],
+    c_ptr: *mut f32,
+    row_base: usize,
+    col_base: usize,
+    n: usize,
+    k: usize,
+    k_start: usize,
+    k_end: usize,
+) {
+    use core::arch::aarch64::*;
+
+    // Load existing C accumulators.
+    let mut c00 = vld1q_f32(c_ptr.add(row_base * n + col_base));
+    let mut c01 = vld1q_f32(c_ptr.add(row_base * n + col_base + 4));
+    let mut c10 = vld1q_f32(c_ptr.add((row_base + 1) * n + col_base));
+    let mut c11 = vld1q_f32(c_ptr.add((row_base + 1) * n + col_base + 4));
+    let mut c20 = vld1q_f32(c_ptr.add((row_base + 2) * n + col_base));
+    let mut c21 = vld1q_f32(c_ptr.add((row_base + 2) * n + col_base + 4));
+    let mut c30 = vld1q_f32(c_ptr.add((row_base + 3) * n + col_base));
+    let mut c31 = vld1q_f32(c_ptr.add((row_base + 3) * n + col_base + 4));
+
+    let a_row0 = a.as_ptr().add(row_base * k);
+    let a_row1 = a.as_ptr().add((row_base + 1) * k);
+    let a_row2 = a.as_ptr().add((row_base + 2) * k);
+    let a_row3 = a.as_ptr().add((row_base + 3) * k);
+    let b_ptr = b.as_ptr();
+
+    for kk in k_start..k_end {
+        let b0 = vld1q_f32(b_ptr.add(kk * n + col_base));
+        let b1 = vld1q_f32(b_ptr.add(kk * n + col_base + 4));
+        let a0 = *a_row0.add(kk);
+        let a1 = *a_row1.add(kk);
+        let a2 = *a_row2.add(kk);
+        let a3 = *a_row3.add(kk);
+        c00 = vfmaq_n_f32(c00, b0, a0);
+        c01 = vfmaq_n_f32(c01, b1, a0);
+        c10 = vfmaq_n_f32(c10, b0, a1);
+        c11 = vfmaq_n_f32(c11, b1, a1);
+        c20 = vfmaq_n_f32(c20, b0, a2);
+        c21 = vfmaq_n_f32(c21, b1, a2);
+        c30 = vfmaq_n_f32(c30, b0, a3);
+        c31 = vfmaq_n_f32(c31, b1, a3);
+    }
+
+    vst1q_f32(c_ptr.add(row_base * n + col_base), c00);
+    vst1q_f32(c_ptr.add(row_base * n + col_base + 4), c01);
+    vst1q_f32(c_ptr.add((row_base + 1) * n + col_base), c10);
+    vst1q_f32(c_ptr.add((row_base + 1) * n + col_base + 4), c11);
+    vst1q_f32(c_ptr.add((row_base + 2) * n + col_base), c20);
+    vst1q_f32(c_ptr.add((row_base + 2) * n + col_base + 4), c21);
+    vst1q_f32(c_ptr.add((row_base + 3) * n + col_base), c30);
+    vst1q_f32(c_ptr.add((row_base + 3) * n + col_base + 4), c31);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn matmul_kernel_4x4_accum(
+    a: &[f32],
+    b: &[f32],
+    c_ptr: *mut f32,
+    row_base: usize,
+    col_base: usize,
+    n: usize,
+    k: usize,
+    k_start: usize,
+    k_end: usize,
+) {
+    use core::arch::aarch64::*;
+
+    let mut c0 = vld1q_f32(c_ptr.add(row_base * n + col_base));
+    let mut c1 = vld1q_f32(c_ptr.add((row_base + 1) * n + col_base));
+    let mut c2 = vld1q_f32(c_ptr.add((row_base + 2) * n + col_base));
+    let mut c3 = vld1q_f32(c_ptr.add((row_base + 3) * n + col_base));
+
+    let a_row0 = a.as_ptr().add(row_base * k);
+    let a_row1 = a.as_ptr().add((row_base + 1) * k);
+    let a_row2 = a.as_ptr().add((row_base + 2) * k);
+    let a_row3 = a.as_ptr().add((row_base + 3) * k);
+    let b_ptr = b.as_ptr();
+
+    for kk in k_start..k_end {
+        let b_vec = vld1q_f32(b_ptr.add(kk * n + col_base));
+        c0 = vfmaq_n_f32(c0, b_vec, *a_row0.add(kk));
+        c1 = vfmaq_n_f32(c1, b_vec, *a_row1.add(kk));
+        c2 = vfmaq_n_f32(c2, b_vec, *a_row2.add(kk));
+        c3 = vfmaq_n_f32(c3, b_vec, *a_row3.add(kk));
+    }
+
+    vst1q_f32(c_ptr.add(row_base * n + col_base), c0);
+    vst1q_f32(c_ptr.add((row_base + 1) * n + col_base), c1);
+    vst1q_f32(c_ptr.add((row_base + 2) * n + col_base), c2);
+    vst1q_f32(c_ptr.add((row_base + 3) * n + col_base), c3);
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+unsafe fn matmul_kernel_4x8_accum(
+    a: &[f32],
+    b: &[f32],
+    c_ptr: *mut f32,
+    row_base: usize,
+    col_base: usize,
+    n: usize,
+    k: usize,
+    k_start: usize,
+    k_end: usize,
+) {
+    for row_off in 0..4 {
+        let row = row_base + row_off;
+        let a_row = &a[row * k..row * k + k];
+        for col_off in 0..8 {
+            let col = col_base + col_off;
+            let mut acc = 0.0f32;
+            for kk in k_start..k_end {
+                acc += a_row[kk] * b[kk * n + col];
+            }
+            *c_ptr.add(row * n + col) += acc;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+unsafe fn matmul_kernel_4x4_accum(
+    a: &[f32],
+    b: &[f32],
+    c_ptr: *mut f32,
+    row_base: usize,
+    col_base: usize,
+    n: usize,
+    k: usize,
+    k_start: usize,
+    k_end: usize,
+) {
+    for row_off in 0..4 {
+        let row = row_base + row_off;
+        let a_row = &a[row * k..row * k + k];
+        for col_off in 0..4 {
+            let col = col_base + col_off;
+            let mut acc = 0.0f32;
+            for kk in k_start..k_end {
+                acc += a_row[kk] * b[kk * n + col];
+            }
+            *c_ptr.add(row * n + col) += acc;
+        }
+    }
+}
+
 fn matmul_2d_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     // 4-row × 8-col register tile. C has 8 NEON accumulators (2 per row,
     // 4 floats each = 32 output cells per thread per K-loop). Cortex-A73

@@ -51,11 +51,22 @@ Single sweep over the `Nx.Defn.Expr` graph before execution.
       ViT-tiny warm forward 5.13 s → **3.02 s** (1.7×). Per-forward
       fusion counts: 12 GELU + 25 LayerNorm + 12 softmax. Pattern
       matchers handle Nx's constant-commute reordering on add/multiply.
-- [ ] **Phase 3** — pre-allocate intermediate buffers; reuse when
-      previous SSA value is dead (saves `Vec<f32>` per op).
+- [x] **Phase 3a (partial)** — in-place output writes in hot NIFs
+      (skip Vec<f32> intermediate). Commit `3fb085e`.
+- [x] **Phase 3b — fused bias-add NIF**. Replaces `Nx.broadcast({K})
+      → add` pattern (the latter had a 60–170 ms wrapper overhead).
+      Commit `49250f9`. ViT-tiny MLP-up bias 92ms → 1ms.
+- [x] **Patchify conv fast path** — ViT 16×16 stride-16 patch
+      embedding as `patches @ kernel^T`. 575 ms → 15 ms.
+- [x] **`ensure_on_arm/1`** for params before Nx-level ops on them.
+      Bumblebee params land on Nx.BinaryBackend; intermediate
+      Nx.transpose on those was pure-Elixir slow.
+- [ ] **Phase 3c — full buffer reuse** — liveness analysis +
+      buffer pool. Most remaining overhead is per-call NIF
+      dispatch + allocation, not compute. ROI smaller now that
+      hot paths are tight.
 - [ ] Elide redundant `Nx.broadcast` calls (when the broadcast result
       already matches the consumer's needs).
-- [ ] Constant-fold trivial subgraphs (bias broadcasts, scale literals).
 
 Use: `Nx.Defn.compile(predict_fn, template_args, compiler: NxArm.Compiler)`.
 For Bumblebee/Axon: `Axon.build/2` doesn't itself use the compiler —

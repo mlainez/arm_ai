@@ -127,12 +127,51 @@ defmodule NxArm.Compiler do
   defp try_patterns(tensor) do
     try_dead_broadcast(tensor) ||
       try_dropout_elim(tensor) ||
+      try_constant_fold(tensor) ||
       try_softmax_divide(tensor) ||
       try_softmax_multiply(tensor) ||
       try_gelu(tensor) ||
       try_layernorm(tensor) ||
       tensor
   end
+
+  # B7: Constant folding. When both operands of a binary op are
+  # `:constant` Expr nodes (and the op is exactly representable
+  # without round-off concerns), evaluate at compile time and emit a
+  # new constant. Nx's expr.ex already folds the common cases at
+  # graph-build time, so this is a defensive net that catches what
+  # leaks through our rewriter (e.g., a constant produced by an
+  # earlier fusion pass).
+  defp try_constant_fold(%Nx.Tensor{data: %Expr{op: op, args: [a, b]}} = tensor)
+       when op in [:add, :subtract, :multiply, :divide, :max, :min] do
+    with {:ok, av} <- extract_scalar_const(a),
+         {:ok, bv} <- extract_scalar_const(b) do
+      result =
+        case op do
+          :add -> av + bv
+          :subtract -> av - bv
+          :multiply -> av * bv
+          :divide -> av / bv
+          :max -> max(av, bv)
+          :min -> min(av, bv)
+        end
+
+      if System.get_env("NXARM_TRACE_FUSION") == "1" do
+        IO.puts("[NxArm fusion] constant fold #{op}(#{av}, #{bv}) = #{result}")
+      end
+
+      %{tensor | data: %Expr{id: make_ref(), op: :constant, args: [result], context: tensor.data.context}}
+    else
+      _ -> nil
+    end
+  end
+
+  defp try_constant_fold(_), do: nil
+
+  defp extract_scalar_const(%Nx.Tensor{data: %Expr{op: :constant, args: [n]}}) when is_number(n),
+    do: {:ok, n * 1.0}
+
+  defp extract_scalar_const(_), do: :error
 
   # B4: Dead broadcast elimination. `Nx.broadcast(x, shape)` where
   # the input already matches `shape` is an identity — but Nx itself

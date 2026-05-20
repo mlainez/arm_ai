@@ -792,6 +792,221 @@ fn read_index(bytes: &[u8], size: usize) -> Result<usize, String> {
     }
 }
 
+/// Strided n-D slice. Output shape is `lengths`. For each output
+/// position, source position is `starts + out_pos * strides`. With
+/// unit strides we coalesce trailing axes into row-memcpys (fast).
+///
+/// Used by Nx.slice and by KV-cache extraction patterns in
+/// transformers.
+pub fn slice(
+    input: &[u8],
+    in_shape: &[usize],
+    starts: &[usize],
+    lengths: &[usize],
+    strides: &[usize],
+    element_size: usize,
+) -> Result<Vec<u8>, String> {
+    let rank = in_shape.len();
+    if starts.len() != rank || lengths.len() != rank || strides.len() != rank {
+        return Err(format!(
+            "slice: rank mismatch (in={}, starts={}, lengths={}, strides={})",
+            rank,
+            starts.len(),
+            lengths.len(),
+            strides.len()
+        ));
+    }
+
+    let out_total: usize = lengths.iter().product();
+    let mut out = vec![0u8; out_total * element_size];
+
+    // Input row-major strides (in elements).
+    let mut in_elem_strides = vec![0usize; rank];
+    if rank > 0 {
+        in_elem_strides[rank - 1] = 1;
+        for k in (0..rank - 1).rev() {
+            in_elem_strides[k] = in_elem_strides[k + 1] * in_shape[k + 1];
+        }
+    }
+
+    // Fast path: all strides == 1. Coalesce trailing axes that are
+    // FULL-COVER (start=0, length=in_shape[k]) into one big memcpy.
+    let all_unit = strides.iter().all(|&s| s == 1);
+
+    if all_unit {
+        // Find the longest trailing run of full-cover axes.
+        let mut coalesce_depth = 0usize;
+        for k in (0..rank).rev() {
+            if starts[k] == 0 && lengths[k] == in_shape[k] {
+                coalesce_depth += 1;
+            } else {
+                break;
+            }
+        }
+
+        // The "outer" axes are 0..rank-coalesce_depth — we walk them
+        // and emit one contiguous copy per outer position.
+        let outer_rank = rank - coalesce_depth;
+        let inner_block_elems: usize = lengths[outer_rank..].iter().product();
+        let inner_block_bytes = inner_block_elems * element_size;
+
+        let outer_lengths: &[usize] = &lengths[..outer_rank];
+        let outer_total: usize = outer_lengths.iter().product();
+
+        // Per-output-axis strides for the outer space (in elements).
+        let mut out_outer_strides = vec![0usize; outer_rank];
+        if outer_rank > 0 {
+            out_outer_strides[outer_rank - 1] = 1;
+            for k in (0..outer_rank - 1).rev() {
+                out_outer_strides[k] = out_outer_strides[k + 1] * outer_lengths[k + 1];
+            }
+        }
+
+        for outer_pos in 0..outer_total {
+            // Decode outer_pos into multi-index, compute input offset.
+            let mut rem = outer_pos;
+            let mut in_elem_off = 0usize;
+            for k in 0..outer_rank {
+                let s = out_outer_strides[k];
+                let idx = if s == 0 { 0 } else { rem / s };
+                rem -= idx * s;
+                in_elem_off += (starts[k] + idx) * in_elem_strides[k];
+            }
+            // Coalesced inner axes contribute `starts[k] * stride[k]`
+            // for each k in the coalesced range. With full-cover and
+            // unit stride, starts[k] = 0 so no contribution.
+            let src_byte = in_elem_off * element_size;
+            let dst_byte = outer_pos * inner_block_bytes;
+            out[dst_byte..dst_byte + inner_block_bytes]
+                .copy_from_slice(&input[src_byte..src_byte + inner_block_bytes]);
+        }
+
+        return Ok(out);
+    }
+
+    // General strided path: per-element copy.
+    let mut out_strides = vec![0usize; rank];
+    if rank > 0 {
+        out_strides[rank - 1] = 1;
+        for k in (0..rank - 1).rev() {
+            out_strides[k] = out_strides[k + 1] * lengths[k + 1];
+        }
+    }
+
+    for out_pos in 0..out_total {
+        let mut rem = out_pos;
+        let mut in_elem_off = 0usize;
+        for k in 0..rank {
+            let s = out_strides[k];
+            let idx = if s == 0 { 0 } else { rem / s };
+            rem -= idx * s;
+            in_elem_off += (starts[k] + idx * strides[k]) * in_elem_strides[k];
+        }
+        let src_byte = in_elem_off * element_size;
+        let dst_byte = out_pos * element_size;
+        out[dst_byte..dst_byte + element_size]
+            .copy_from_slice(&input[src_byte..src_byte + element_size]);
+    }
+
+    Ok(out)
+}
+
+/// Write `slice` into `tensor` starting at `starts`. Returns a fresh
+/// tensor — the operation isn't in-place from Nx's POV.
+pub fn put_slice(
+    tensor: &[u8],
+    in_shape: &[usize],
+    slice: &[u8],
+    slice_shape: &[usize],
+    starts: &[usize],
+    element_size: usize,
+) -> Result<Vec<u8>, String> {
+    let rank = in_shape.len();
+    if starts.len() != rank || slice_shape.len() != rank {
+        return Err(format!(
+            "put_slice: rank mismatch (in={}, slice={}, starts={})",
+            rank,
+            slice_shape.len(),
+            starts.len()
+        ));
+    }
+
+    // Bounds check.
+    for k in 0..rank {
+        if starts[k] + slice_shape[k] > in_shape[k] {
+            return Err(format!(
+                "put_slice: slice axis {} out of range ({} + {} > {})",
+                k, starts[k], slice_shape[k], in_shape[k]
+            ));
+        }
+    }
+
+    // Start with a copy of `tensor`.
+    let mut out = tensor.to_vec();
+
+    // Input row-major strides.
+    let mut in_elem_strides = vec![0usize; rank];
+    if rank > 0 {
+        in_elem_strides[rank - 1] = 1;
+        for k in (0..rank - 1).rev() {
+            in_elem_strides[k] = in_elem_strides[k + 1] * in_shape[k + 1];
+        }
+    }
+
+    // Slice row-major strides.
+    let mut sl_elem_strides = vec![0usize; rank];
+    if rank > 0 {
+        sl_elem_strides[rank - 1] = 1;
+        for k in (0..rank - 1).rev() {
+            sl_elem_strides[k] = sl_elem_strides[k + 1] * slice_shape[k + 1];
+        }
+    }
+
+    // Coalesce trailing axes that are full-cover in the slice.
+    let mut coalesce_depth = 0usize;
+    for k in (0..rank).rev() {
+        if starts[k] == 0 && slice_shape[k] == in_shape[k] {
+            coalesce_depth += 1;
+        } else {
+            break;
+        }
+    }
+
+    let outer_rank = rank - coalesce_depth;
+    let inner_block_elems: usize = slice_shape[outer_rank..].iter().product();
+    let inner_block_bytes = inner_block_elems * element_size;
+
+    let outer_lengths: &[usize] = &slice_shape[..outer_rank];
+    let outer_total: usize = outer_lengths.iter().product();
+
+    let mut outer_strides = vec![0usize; outer_rank];
+    if outer_rank > 0 {
+        outer_strides[outer_rank - 1] = 1;
+        for k in (0..outer_rank - 1).rev() {
+            outer_strides[k] = outer_strides[k + 1] * outer_lengths[k + 1];
+        }
+    }
+
+    for outer_pos in 0..outer_total {
+        let mut rem = outer_pos;
+        let mut in_elem_off = 0usize;
+        let mut sl_elem_off = 0usize;
+        for k in 0..outer_rank {
+            let s = outer_strides[k];
+            let idx = if s == 0 { 0 } else { rem / s };
+            rem -= idx * s;
+            in_elem_off += (starts[k] + idx) * in_elem_strides[k];
+            sl_elem_off += idx * sl_elem_strides[k];
+        }
+        let dst_byte = in_elem_off * element_size;
+        let src_byte = sl_elem_off * element_size;
+        out[dst_byte..dst_byte + inner_block_bytes]
+            .copy_from_slice(&slice[src_byte..src_byte + inner_block_bytes]);
+    }
+
+    Ok(out)
+}
+
 // ── f32 elementwise (CPU NEON via auto-vectoriser) ──────
 
 /// Same-shape elementwise binary op on f32 arrays. Writes directly

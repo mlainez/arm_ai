@@ -79,6 +79,30 @@ defmodule NxArm.Native do
   def gather_op(_input, _in_shape, _indices, _idx_shape, _index_size, _axes, _element_size),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "Strided n-D slice. Output shape is `lengths`."
+  @spec slice_op(
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [non_neg_integer()],
+          non_neg_integer()
+        ) :: binary()
+  def slice_op(_input, _in_shape, _starts, _lengths, _strides, _element_size),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Write `slice` into `tensor` at `starts`. Returns a fresh tensor."
+  @spec put_slice_op(
+          binary(),
+          [non_neg_integer()],
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          non_neg_integer()
+        ) :: binary()
+  def put_slice_op(_tensor, _in_shape, _slice, _slice_shape, _starts, _element_size),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # ── f32 matmul ─────────────────────────────────────────
 
   @doc """

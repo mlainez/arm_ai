@@ -630,12 +630,54 @@ defmodule NxArm.Backend do
   def clip(out, tensor, min, max), do: fallback(:clip, [out, tensor, min, max])
 
   @impl true
-  def slice(out, tensor, starts, lengths, strides),
-    do: fallback(:slice, [out, tensor, starts, lengths, strides])
+  def slice(out, tensor, starts, lengths, strides) do
+    in_shape = Nx.shape(tensor) |> Tuple.to_list()
+    esize = element_size(Nx.type(tensor))
+    bin = bin_of(tensor)
+    out_bin = NxArm.Native.slice_op(bin, in_shape, starts, lengths, strides, esize)
+    put_in(out.data, %__MODULE__{bin: out_bin})
+  end
 
   @impl true
-  def put_slice(out, tensor, start_tensor, starts),
-    do: fallback(:put_slice, [out, tensor, start_tensor, starts])
+  def put_slice(out, tensor, starts, slice_tensor) do
+    in_shape = Nx.shape(tensor) |> Tuple.to_list()
+    slice_shape = Nx.shape(slice_tensor) |> Tuple.to_list()
+    esize = element_size(Nx.type(tensor))
+
+    # Nx allows start_indices to be a mix of integers and 0-D tensors
+    # (for dynamic indexing). Normalise to plain integers — bail to
+    # fallback if any is actually dynamic.
+    case normalize_starts(starts) do
+      {:ok, int_starts} ->
+        tensor_bin = bin_of(tensor)
+        slice_bin = bin_of(slice_tensor)
+        out_bin = NxArm.Native.put_slice_op(tensor_bin, in_shape, slice_bin, slice_shape, int_starts, esize)
+        put_in(out.data, %__MODULE__{bin: out_bin})
+
+      :dynamic ->
+        fallback(:put_slice, [out, tensor, starts, slice_tensor])
+    end
+  end
+
+  defp normalize_starts(starts) do
+    result =
+      Enum.reduce_while(starts, [], fn
+        i, acc when is_integer(i) ->
+          {:cont, [i | acc]}
+
+        %Nx.Tensor{shape: {}} = t, acc ->
+          # 0-D tensor of an integer — read its value.
+          {:cont, [Nx.to_number(t) | acc]}
+
+        _other, _acc ->
+          {:halt, :dynamic}
+      end)
+
+    case result do
+      :dynamic -> :dynamic
+      list -> {:ok, Enum.reverse(list)}
+    end
+  end
 
   @impl true
   def gather(out, input, indices, opts) do

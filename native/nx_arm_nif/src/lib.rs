@@ -72,6 +72,50 @@ fn transpose_op<'a>(
 /// lookup) use `axes = [0]` — that goes through the fast contiguous
 /// memcpy path.
 #[rustler::nif(schedule = "DirtyCpu")]
+fn slice_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    in_shape: Vec<usize>,
+    starts: Vec<usize>,
+    lengths: Vec<usize>,
+    strides: Vec<usize>,
+    element_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let out = shape_ops::slice(
+        input.as_slice(),
+        &in_shape,
+        &starts,
+        &lengths,
+        &strides,
+        element_size,
+    )
+    .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    bytes_to_bin(env, &out)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn put_slice_op<'a>(
+    env: Env<'a>,
+    tensor: rustler::Binary<'a>,
+    in_shape: Vec<usize>,
+    slice: rustler::Binary<'a>,
+    slice_shape: Vec<usize>,
+    starts: Vec<usize>,
+    element_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let out = shape_ops::put_slice(
+        tensor.as_slice(),
+        &in_shape,
+        slice.as_slice(),
+        &slice_shape,
+        &starts,
+        element_size,
+    )
+    .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    bytes_to_bin(env, &out)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 fn gather_op<'a>(
     env: Env<'a>,
     input: rustler::Binary<'a>,

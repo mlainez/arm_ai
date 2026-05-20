@@ -436,6 +436,34 @@ fn scalar_binary_f32_op<'a>(
     Ok(bin.release(env))
 }
 
+/// Fused linear: `out = act @ w^T + bias`. Optionally chains an
+/// activation in the same pass.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn linear_f32_op<'a>(
+    env: Env<'a>,
+    act: rustler::Binary<'a>,
+    weights: rustler::Binary<'a>,
+    bias: rustler::Binary<'a>,
+    activation: String,
+    b: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let need_act = b * m * k;
+    let act_slice: &[f32] = unsafe { std::slice::from_raw_parts(act.as_ptr() as *const f32, need_act) };
+    let w_slice: &[f32] = unsafe { std::slice::from_raw_parts(weights.as_ptr() as *const f32, n * k) };
+    let bias_slice = if bias.is_empty() {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(bias.as_ptr() as *const f32, n) })
+    };
+
+    let out = shape_ops::linear_f32(act_slice, w_slice, bias_slice, b, m, n, k, &activation)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
 /// Fused bias-add + activation. Replaces the
 /// `out = activation(linear + bias)` pattern with one pass.
 #[rustler::nif(schedule = "DirtyCpu")]

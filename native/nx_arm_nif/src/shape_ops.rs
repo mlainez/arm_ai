@@ -954,6 +954,79 @@ unsafe fn dot4_neon(a: *const f32, b: *const f32, k: usize) -> f32 {
 /// Bumblebee MLP / projection pattern — saves ~60–170 ms per call
 /// vs going through `Nx.broadcast` (whose wrapper has substantial
 /// per-call overhead for hot-loop callers).
+/// Fused linear layer: `out[b, m, n] = sum_k act[b, m, k] * w[n, k] + bias[n]`.
+/// Equivalent to `batched_matmul_f32(_, _, _, _, _, _, true)` followed by
+/// bias-add along the last axis, but done in one pass. Saves one alloc +
+/// one write-read pass over the matmul output (which can be tens of MB
+/// for big MLP shapes).
+pub fn linear_f32(
+    act: &[f32],
+    weights: &[f32],
+    bias: Option<&[f32]>,
+    b: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    activation: &str,
+) -> Result<Vec<f32>, String> {
+    let need_act = b * m * k;
+    let need_w = n * k;
+    if act.len() != need_act {
+        return Err(format!(
+            "linear: act len {} != B*M*K = {}",
+            act.len(),
+            need_act
+        ));
+    }
+    if weights.len() != need_w {
+        return Err(format!(
+            "linear: weights len {} != N*K = {}",
+            weights.len(),
+            need_w
+        ));
+    }
+    if let Some(b) = bias {
+        if b.len() != n {
+            return Err(format!("linear: bias len {} != N = {}", b.len(), n));
+        }
+    }
+
+    let mut out = vec![0.0f32; b * m * n];
+    let inv_sqrt2 = 1.0_f32 / std::f32::consts::SQRT_2;
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(n).enumerate().for_each(|(bi_row, row)| {
+        let batch = bi_row / m;
+        let i = bi_row % m;
+        let a_base = batch * m * k + i * k;
+        let a = &act[a_base..a_base + k];
+
+        for j in 0..n {
+            let w_base = j * k;
+            let w = &weights[w_base..w_base + k];
+
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += a[kk] * w[kk];
+            }
+
+            let with_bias = acc + bias.map(|bb| bb[j]).unwrap_or(0.0);
+
+            row[j] = match activation {
+                "none" => with_bias,
+                "relu" => if with_bias > 0.0 { with_bias } else { 0.0 },
+                "relu6" => with_bias.max(0.0).min(6.0),
+                "sigmoid" => 1.0 / (1.0 + (-with_bias).exp()),
+                "tanh" => with_bias.tanh(),
+                "gelu" => 0.5 * with_bias * (1.0 + erf_f32(with_bias * inv_sqrt2)),
+                _ => with_bias,
+            };
+        }
+    });
+
+    Ok(out)
+}
+
 /// Fused bias-add + activation: `out[i] = activation(act[i] + bias[i mod inner])`.
 /// Saves the intermediate write+read between bias-add and the
 /// activation. Used in CNN blocks (Conv + bias + ReLU) and Linear +

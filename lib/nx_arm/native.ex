@@ -140,6 +140,15 @@ defmodule NxArm.Native do
   def elementwise_unary_f32_op(_op, _a), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Fused linear: `out = act @ w^T + bias`. `bias` may be empty for
+  no-bias linear. `activation` is one of `"none" | "relu" | "relu6"
+  | "gelu" | "sigmoid" | "tanh"` (chained in the same pass).
+  """
+  @spec linear_f32_op(binary(), binary(), binary(), String.t(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  def linear_f32_op(_act, _weights, _bias, _activation, _b, _m, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Fused bias-add + activation in one pass.
   `activation` is one of `"none" | "relu" | "relu6" | "gelu" | "sigmoid" | "tanh"`.
   Saves the intermediate write+read between bias-add and activation.

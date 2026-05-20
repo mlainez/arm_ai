@@ -184,4 +184,13 @@ defmodule NxArm.Native do
   @spec conv2d_f32_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) :: binary()
   def conv2d_f32_op(_input, _weight, _bias, _dims, _stride, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Depthwise 2-D conv (feature_group_size == Cin). Kernel laid out as
+  `{Cin, Kh, Kw}` raw f32 LE. NHWC input + NHWC output. Used by
+  MobileNet/EfficientNet's per-channel spatial filter blocks.
+  """
+  @spec depthwise_conv2d_f32_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) :: binary()
+  def depthwise_conv2d_f32_op(_input, _weight, _bias, _dims, _stride, _padding),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

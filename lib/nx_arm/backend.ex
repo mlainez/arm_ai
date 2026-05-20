@@ -432,10 +432,72 @@ defmodule NxArm.Backend do
       tuple_size(Nx.shape(kernel)) != 4 -> fallback(:conv, [out, tensor, kernel, opts])
       not all_ones?(input_dilation) -> fallback(:conv, [out, tensor, kernel, opts])
       not all_ones?(kernel_dilation) -> fallback(:conv, [out, tensor, kernel, opts])
-      feature_group_size != 1 -> fallback(:conv, [out, tensor, kernel, opts])
       batch_group_size != 1 -> fallback(:conv, [out, tensor, kernel, opts])
+
+      # Depthwise: feature_group_size == Cin. Each kernel "group" has
+      # 1 input channel and 1 output channel — MobileNet/EfficientNet
+      # pattern.
+      feature_group_size == elem(Nx.shape(tensor), Enum.at(input_perm, 1)) ->
+        do_depthwise_neon_conv(out, tensor, kernel, strides, padding, input_perm, kernel_perm, output_perm)
+
+      feature_group_size != 1 -> fallback(:conv, [out, tensor, kernel, opts])
+
       true -> do_neon_conv(out, tensor, kernel, strides, padding, input_perm, kernel_perm, output_perm)
     end
+  end
+
+  defp do_depthwise_neon_conv(out, tensor, kernel, strides, padding, input_perm, kernel_perm, output_perm) do
+    tensor = ensure_on_arm(tensor)
+    kernel = ensure_on_arm(kernel)
+
+    [batch_ax, chan_ax, h_ax, w_ax] = input_perm
+    nhwc_in = Nx.transpose(tensor, axes: [batch_ax, h_ax, w_ax, chan_ax])
+
+    # Kernel: Nx hands us {Cin, 1, Kh, Kw} after the perm. We squeeze
+    # the second axis (which has size 1 in depthwise) to get
+    # {Cin, Kh, Kw}.
+    [out_ch_ax, in_ch_ax, kh_ax, kw_ax] = kernel_perm
+    cout_first_kernel = Nx.transpose(kernel, axes: [out_ch_ax, kh_ax, kw_ax, in_ch_ax])
+    {c_in, kh, kw, group_in} = Nx.shape(cout_first_kernel)
+
+    if group_in != 1 do
+      raise ArgumentError,
+            "depthwise conv expected kernel group_in == 1, got #{group_in}"
+    end
+
+    weight_3d = Nx.reshape(cout_first_kernel, {c_in, kh, kw})
+
+    {n, h_in, w_in, _} = Nx.shape(nhwc_in)
+
+    {sh, sw} =
+      case strides do
+        [a, b] -> {a, b}
+        a when is_integer(a) -> {a, a}
+      end
+
+    {pt, pb, pl, pr} = normalize_conv_padding(padding, h_in, w_in, kh, kw, sh, sw)
+
+    out_bin =
+      NxArm.Native.depthwise_conv2d_f32_op(
+        bin_of(nhwc_in),
+        bin_of(weight_3d),
+        <<>>,
+        [n, h_in, w_in, c_in, kh, kw],
+        [sh, sw],
+        [pt, pb, pl, pr]
+      )
+
+    h_out = div(h_in + pt + pb - kh, sh) + 1
+    w_out = div(w_in + pl + pr - kw, sw) + 1
+
+    nhwc_out =
+      Nx.from_binary(out_bin, :f32, backend: __MODULE__)
+      |> Nx.reshape({n, h_out, w_out, c_in})
+
+    [o_batch_ax, o_chan_ax, o_h_ax, o_w_ax] = output_perm
+    nhwc_to_caller = invert_permutation([o_batch_ax, o_h_ax, o_w_ax, o_chan_ax])
+    permuted = Nx.transpose(nhwc_out, axes: nhwc_to_caller)
+    put_in(out.data, permuted.data)
   end
 
   defp all_ones?(list), do: Enum.all?(list, &(&1 == 1))

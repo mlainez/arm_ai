@@ -320,6 +320,103 @@ pub fn conv2d_f32(
 /// f32 ⋅ f32 row dot. NEON path processes 8 f32 per iteration via two
 /// vfmaq_f32 calls. Scalar fallback for non-aarch64 hosts.
 #[inline(always)]
+/// Depthwise 2-D convolution. Per channel c in 0..Cin we compute
+///   `out[n, ho, wo, c] = sum_{kh, kw} input[n, ho*Sh+kh-Pt, wo*Sw+kw-Pl, c]
+///                                     * kernel[c, kh, kw]`
+/// then add `bias[c]` if provided.
+///
+/// Used by MobileNet/EfficientNet families' depthwise+pointwise
+/// alternating blocks. With feature_group_size == Cin, Nx hands us
+/// kernel {Cin, 1, Kh, Kw}; we treat the 1-dim as squeezed to
+/// {Cin, Kh, Kw}.
+///
+/// Layout (NHWC) input + per-channel weights matches our existing
+/// conv2d_f32 conventions; output is NHWC f32.
+pub fn depthwise_conv2d_f32(
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    out: &mut [f32],
+    n: usize,
+    h_in: usize,
+    w_in: usize,
+    c_in: usize,
+    kh: usize,
+    kw: usize,
+    stride_h: usize,
+    stride_w: usize,
+    pad_top: usize,
+    pad_bottom: usize,
+    pad_left: usize,
+    pad_right: usize,
+) {
+    let (h_out, w_out) = output_dims(
+        h_in, w_in, kh, kw, stride_h, stride_w, pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    // Parallelise over (n, ho). Per work unit fills one row of one
+    // batch's output: w_out * c_in output cells. Picking (n, ho) as
+    // the parallel axes keeps the kernel + per-channel state hot in
+    // L1 within the loop and gives plenty of work units (n * h_out =
+    // e.g. 1 * 56 = 56 for a MobileNet block).
+    use rayon::prelude::*;
+
+    let c_in_ = c_in;
+    let w_out_ = w_out;
+    let h_in_ = h_in as isize;
+    let w_in_ = w_in as isize;
+    let pad_top_ = pad_top as isize;
+    let pad_left_ = pad_left as isize;
+
+    out.par_chunks_mut(w_out_ * c_in_)
+        .enumerate()
+        .for_each(|(nh, row_out)| {
+            let batch = nh / h_out;
+            let ho = nh % h_out;
+            let in_batch_off = batch * h_in * w_in * c_in;
+
+            for wo in 0..w_out {
+                let cell_out_off = wo * c_in_;
+                let h_orig_base = ho as isize * stride_h as isize - pad_top_;
+                let w_orig_base = wo as isize * stride_w as isize - pad_left_;
+
+                // Per-channel accumulator, reset each output cell.
+                // The inner loops over kh × kw are short (typically 3
+                // or 5) — the compiler can unroll + vectorise across
+                // the contiguous c_in run inside.
+                for c in 0..c_in_ {
+                    let mut acc = bias.map(|b| b[c]).unwrap_or(0.0);
+
+                    for kh_i in 0..kh {
+                        let h_in_idx = h_orig_base + kh_i as isize;
+                        if h_in_idx < 0 || h_in_idx >= h_in_ {
+                            continue;
+                        }
+                        let h_in_idx = h_in_idx as usize;
+
+                        for kw_i in 0..kw {
+                            let w_in_idx = w_orig_base + kw_i as isize;
+                            if w_in_idx < 0 || w_in_idx >= w_in_ {
+                                continue;
+                            }
+                            let w_in_idx = w_in_idx as usize;
+
+                            let in_off =
+                                in_batch_off + (h_in_idx * w_in + w_in_idx) * c_in_ + c;
+                            let wt_off = c * kh * kw + kh_i * kw + kw_i;
+                            acc += input[in_off] * weight[wt_off];
+                        }
+                    }
+
+                    row_out[cell_out_off + c] = acc;
+                }
+            }
+
+            // Silence unused-var warnings when bias is None.
+            let _ = (&bias, pad_bottom, pad_right);
+        });
+}
+
 fn ci_dot_f32(weights: &[f32], input: &[f32]) -> f32 {
     debug_assert_eq!(weights.len(), input.len());
 

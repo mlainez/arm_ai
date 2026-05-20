@@ -1401,6 +1401,208 @@ pub fn window_reduce_f32(
         ));
     }
 
+    // Fast path: 4-D NHWC pooling. Pattern:
+    //   in_shape   = {N, H, W, C}
+    //   window     = {1, kh, kw, 1}     (no batch or channel pooling)
+    //   strides    = {1, sh, sw, 1}
+    //   padding    = {(0,0), (pt,pb), (pl,pr), (0,0)}
+    // Vectorise across the channel axis (last, contiguous), 4 channels
+    // per NEON instruction. This is the case ResNet / MobileNet /
+    // EfficientNet pooling layers always hit.
+    if rank == 4
+        && window_dims[0] == 1
+        && window_dims[3] == 1
+        && strides[0] == 1
+        && strides[3] == 1
+        && padding[0] == (0, 0)
+        && padding[3] == (0, 0)
+        && in_shape[3] >= 4
+    {
+        return Ok(window_reduce_nhwc_f32(
+            op,
+            input,
+            in_shape[0],
+            in_shape[1],
+            in_shape[2],
+            in_shape[3],
+            window_dims[1],
+            window_dims[2],
+            strides[1],
+            strides[2],
+            padding[1],
+            padding[2],
+        )?);
+    }
+
+    let _unused = ();
+    legacy_window_reduce_f32(op, input, in_shape, window_dims, strides, padding)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn window_reduce_nhwc_f32(
+    op: &str,
+    input: &[f32],
+    n: usize,
+    h: usize,
+    w: usize,
+    c: usize,
+    kh: usize,
+    kw: usize,
+    sh: usize,
+    sw: usize,
+    pad_h: (isize, isize),
+    pad_w: (isize, isize),
+) -> Result<(Vec<f32>, Vec<usize>), String> {
+    use core::arch::aarch64::*;
+    use rayon::prelude::*;
+
+    let (pt, pb) = pad_h;
+    let (pl, pr) = pad_w;
+    let h_out = ((h as isize + pt + pb - kh as isize) / sh as isize) as usize + 1;
+    let w_out = ((w as isize + pl + pr - kw as isize) / sw as isize) as usize + 1;
+
+    let mut out = vec![0.0f32; n * h_out * w_out * c];
+    let avg_n = (kh * kw) as f32;
+
+    let init = match op {
+        "max" => f32::NEG_INFINITY,
+        "min" => f32::INFINITY,
+        "sum" | "product" => match op {
+            "sum" => 0.0,
+            "product" => 1.0,
+            _ => 0.0,
+        },
+        other => return Err(format!("unknown window op: {}", other)),
+    };
+
+    let c_tiles = c / 4;
+    let c_tail = c_tiles * 4;
+
+    out.par_chunks_mut(w_out * c)
+        .enumerate()
+        .for_each(|(nh_idx, row_out)| {
+            let n_idx = nh_idx / h_out;
+            let ho = nh_idx % h_out;
+
+            for wo in 0..w_out {
+                let h_orig_base = ho as isize * sh as isize - pt;
+                let w_orig_base = wo as isize * sw as isize - pl;
+
+                unsafe {
+                    for ct in 0..c_tiles {
+                        let mut acc = vdupq_n_f32(init);
+
+                        for ki in 0..kh {
+                            let in_y = h_orig_base + ki as isize;
+                            if in_y < 0 || in_y >= h as isize {
+                                continue;
+                            }
+                            for kj in 0..kw {
+                                let in_x = w_orig_base + kj as isize;
+                                if in_x < 0 || in_x >= w as isize {
+                                    continue;
+                                }
+                                let in_off = ((n_idx * h + in_y as usize) * w
+                                    + in_x as usize)
+                                    * c
+                                    + ct * 4;
+                                let v = vld1q_f32(input.as_ptr().add(in_off));
+                                acc = match op {
+                                    "max" => vmaxq_f32(acc, v),
+                                    "min" => vminq_f32(acc, v),
+                                    "sum" => vaddq_f32(acc, v),
+                                    "product" => vmulq_f32(acc, v),
+                                    _ => unreachable!(),
+                                };
+                            }
+                        }
+
+                        vst1q_f32(row_out.as_mut_ptr().add(wo * c + ct * 4), acc);
+                    }
+
+                    // C tail (c % 4 channels) — scalar.
+                    for ct in c_tail..c {
+                        let mut acc = init;
+                        for ki in 0..kh {
+                            let in_y = h_orig_base + ki as isize;
+                            if in_y < 0 || in_y >= h as isize {
+                                continue;
+                            }
+                            for kj in 0..kw {
+                                let in_x = w_orig_base + kj as isize;
+                                if in_x < 0 || in_x >= w as isize {
+                                    continue;
+                                }
+                                let in_off = ((n_idx * h + in_y as usize) * w
+                                    + in_x as usize)
+                                    * c
+                                    + ct;
+                                let v = input[in_off];
+                                acc = match op {
+                                    "max" => acc.max(v),
+                                    "min" => acc.min(v),
+                                    "sum" => acc + v,
+                                    "product" => acc * v,
+                                    _ => unreachable!(),
+                                };
+                            }
+                        }
+                        row_out[wo * c + ct] = acc;
+                    }
+                }
+            }
+        });
+
+    let _ = avg_n;
+    Ok((out, vec![n, h_out, w_out, c]))
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn window_reduce_nhwc_f32(
+    op: &str,
+    input: &[f32],
+    n: usize,
+    h: usize,
+    w: usize,
+    c: usize,
+    kh: usize,
+    kw: usize,
+    sh: usize,
+    sw: usize,
+    pad_h: (isize, isize),
+    pad_w: (isize, isize),
+) -> Result<(Vec<f32>, Vec<usize>), String> {
+    legacy_window_reduce_f32(
+        op,
+        input,
+        &[n, h, w, c],
+        &[1, kh, kw, 1],
+        &[1, sh, sw, 1],
+        &[(0, 0), pad_h, pad_w, (0, 0)],
+    )
+}
+
+/// Generic n-D window reduction. Used when the fast NHWC path
+/// doesn't apply (rank != 4, pooling across channels, etc.).
+fn legacy_window_reduce_f32(
+    op: &str,
+    input: &[f32],
+    in_shape: &[usize],
+    window_dims: &[usize],
+    strides: &[usize],
+    padding: &[(isize, isize)],
+) -> Result<(Vec<f32>, Vec<usize>), String> {
+    let rank = in_shape.len();
+    if window_dims.len() != rank || strides.len() != rank || padding.len() != rank {
+        return Err(format!(
+            "legacy_window_reduce: rank mismatch (in={}, win={}, strides={}, pad={})",
+            rank,
+            window_dims.len(),
+            strides.len(),
+            padding.len()
+        ));
+    }
+
     // Output shape per axis: floor((in_size + pad_lo + pad_hi - win) / stride) + 1
     let out_shape: Vec<usize> = (0..rank)
         .map(|k| {

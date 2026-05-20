@@ -638,7 +638,25 @@ defmodule NxArm.Backend do
     do: fallback(:put_slice, [out, tensor, start_tensor, starts])
 
   @impl true
-  def gather(out, input, indices, opts), do: fallback(:gather, [out, input, indices, opts])
+  def gather(out, input, indices, opts) do
+    axes = opts[:axes] || Enum.to_list(0..(tuple_size(Nx.shape(indices)) - 1) - 1)
+    in_shape = Nx.shape(input) |> Tuple.to_list()
+    idx_shape = Nx.shape(indices) |> Tuple.to_list()
+    in_rank = length(in_shape)
+
+    contiguous_prefix? = axes == Enum.to_list(0..(length(axes) - 1))
+
+    if contiguous_prefix? and length(axes) <= in_rank do
+      esize = element_size(Nx.type(input))
+      isize = element_size(Nx.type(indices))
+      in_bin = bin_of(input)
+      idx_bin = bin_of(indices)
+      out_bin = NxArm.Native.gather_op(in_bin, in_shape, idx_bin, idx_shape, isize, axes, esize)
+      put_in(out.data, %__MODULE__{bin: out_bin})
+    else
+      fallback(:gather, [out, input, indices, opts])
+    end
+  end
 
   @impl true
   def stack(out, tensors, axis), do: fallback(:stack, [out, tensors, axis])
@@ -735,9 +753,11 @@ defmodule NxArm.Backend do
   end
 
   @impl true
-  def block(out, tensor, _opts, fun) do
-    # Defn block callback — we just call the function with the tensor.
-    %{out | data: fun.(tensor).data}
+  def block(struct, _output, args, fun) do
+    # Mirrors `Nx.BinaryBackend.block/4`: apply the user-supplied `fun`
+    # to the captured struct + args. Used by Nx for grouping operations
+    # under a Defn-style block construct.
+    apply(fun, [struct | args])
   end
 
   # ── Custom fused ops (dispatched by NxArm.Compiler rewrite pass) ──

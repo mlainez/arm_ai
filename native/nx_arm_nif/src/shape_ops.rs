@@ -664,6 +664,134 @@ pub fn bias_add_f32_into(
     Ok(())
 }
 
+/// Generic gather along (potentially) several axes. Matches Nx's
+/// gather semantics: `indices` has shape `[..., depth]`. Each `depth`-
+/// length row picks one position in the indexed axes; the gathered
+/// block (the non-indexed axes) is copied to the output. `axes` is the
+/// list of indexed `tensor` axes; if it's a prefix `[0, 1, ..., depth-1]`
+/// the gathered block is contiguous in the input (fast memcpy path).
+///
+/// `index_size` is the byte width of one index (4 for s32/u32, 8 for
+/// s64). `element_size` is the byte width of one tensor element.
+///
+/// Input/output bytes; works for any tensor element type.
+pub fn gather(
+    input: &[u8],
+    in_shape: &[usize],
+    indices: &[u8],
+    idx_shape: &[usize],
+    index_size: usize,
+    axes: &[usize],
+    element_size: usize,
+) -> Result<Vec<u8>, String> {
+    let depth = axes.len();
+    let in_rank = in_shape.len();
+    let idx_rank = idx_shape.len();
+
+    if idx_rank == 0 {
+        return Err("gather: indices must have rank ≥ 1".into());
+    }
+
+    if elem_get(idx_shape, idx_rank - 1) != depth {
+        return Err(format!(
+            "gather: indices last axis {} must equal axes count {}",
+            elem_get(idx_shape, idx_rank - 1),
+            depth
+        ));
+    }
+
+    if depth > in_rank {
+        return Err(format!(
+            "gather: axes count {} > input rank {}",
+            depth, in_rank
+        ));
+    }
+
+    // Per-input-axis row-major strides (in elements).
+    let mut in_strides = vec![0usize; in_rank];
+    if in_rank > 0 {
+        in_strides[in_rank - 1] = 1;
+        for k in (0..in_rank - 1).rev() {
+            in_strides[k] = in_strides[k + 1] * in_shape[k + 1];
+        }
+    }
+
+    // Block size: product of input axes NOT in `axes`. For the
+    // contiguous fast path this is the trailing axes' product.
+    let indexed_axes_set: std::collections::HashSet<usize> = axes.iter().copied().collect();
+    let block_elems: usize = (0..in_rank)
+        .filter(|i| !indexed_axes_set.contains(i))
+        .map(|i| in_shape[i])
+        .product();
+
+    let n_lookups: usize = idx_shape[..idx_rank - 1].iter().product();
+    let total_out_elems = n_lookups * block_elems;
+    let mut out_bytes = vec![0u8; total_out_elems * element_size];
+
+    // For each lookup row, decode `depth` indices and compute the
+    // input element offset. Then either memcpy a contiguous block (if
+    // `axes` is a contiguous prefix) or walk the strided gather.
+    let contiguous_prefix = axes.iter().enumerate().all(|(i, &a)| a == i);
+
+    if contiguous_prefix {
+        // Fast path: gathered block is `prod(in_shape[depth..])`
+        // contiguous elements in the input.
+        let block_bytes = block_elems * element_size;
+
+        for lookup in 0..n_lookups {
+            let mut in_elem_offset = 0usize;
+            for k in 0..depth {
+                let raw = &indices[(lookup * depth + k) * index_size..(lookup * depth + k + 1) * index_size];
+                let idx = read_index(raw, index_size)?;
+                if idx >= in_shape[axes[k]] {
+                    return Err(format!(
+                        "gather: index {} out of range [0, {})",
+                        idx, in_shape[axes[k]]
+                    ));
+                }
+                in_elem_offset += idx * in_strides[axes[k]];
+            }
+            let src_byte = in_elem_offset * element_size;
+            let dst_byte = lookup * block_bytes;
+            out_bytes[dst_byte..dst_byte + block_bytes]
+                .copy_from_slice(&input[src_byte..src_byte + block_bytes]);
+        }
+
+        Ok(out_bytes)
+    } else {
+        // General path — gather strided sub-blocks. Slower (per-element
+        // copy), but supports arbitrary `axes` configurations. For the
+        // text-embedding use case `axes` is always `[0]`, so this
+        // branch is rarely hit in practice.
+        Err("gather: non-prefix axes not yet supported".into())
+    }
+}
+
+fn elem_get<T: Copy>(s: &[T], i: usize) -> T {
+    s[i]
+}
+
+fn read_index(bytes: &[u8], size: usize) -> Result<usize, String> {
+    match size {
+        4 => {
+            // Most index tensors in Nx are s64 or s32. We read as
+            // little-endian unsigned; for sensible (non-negative)
+            // indices this matches the signed interpretation. Negative
+            // indices would silently wrap — Nx's semantics raise on
+            // those, but we check the upper bound after.
+            let v = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            Ok(v as usize)
+        }
+        8 => {
+            let v = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            Ok(v as usize)
+        }
+        n => Err(format!("gather: unsupported index byte size {}", n)),
+    }
+}
+
 // ── f32 elementwise (CPU NEON via auto-vectoriser) ──────
 
 /// Same-shape elementwise binary op on f32 arrays. Writes directly

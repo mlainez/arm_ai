@@ -62,6 +62,23 @@ defmodule NxArm.Native do
   def concatenate_op(_tensors, _shapes, _axis, _element_size),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Generic gather. `axes` lists which axes of `input` are indexed by
+  the trailing dim of `indices`. Fast path when axes is a contiguous
+  prefix (the embedding-lookup case).
+  """
+  @spec gather_op(
+          binary(),
+          [non_neg_integer()],
+          binary(),
+          [non_neg_integer()],
+          non_neg_integer(),
+          [non_neg_integer()],
+          non_neg_integer()
+        ) :: binary()
+  def gather_op(_input, _in_shape, _indices, _idx_shape, _index_size, _axes, _element_size),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # ── f32 matmul ─────────────────────────────────────────
 
   @doc """

@@ -67,6 +67,34 @@ fn transpose_op<'a>(
     bytes_to_bin(env, &out)
 }
 
+/// Generic gather. `axes` lists which `tensor` axes are indexed by
+/// the trailing dim of `indices`. Most callers (token-embedding
+/// lookup) use `axes = [0]` — that goes through the fast contiguous
+/// memcpy path.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn gather_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    in_shape: Vec<usize>,
+    indices: rustler::Binary<'a>,
+    idx_shape: Vec<usize>,
+    index_size: usize,
+    axes: Vec<usize>,
+    element_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let out = shape_ops::gather(
+        input.as_slice(),
+        &in_shape,
+        indices.as_slice(),
+        &idx_shape,
+        index_size,
+        &axes,
+        element_size,
+    )
+    .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    bytes_to_bin(env, &out)
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn concatenate_op<'a>(
     env: Env<'a>,

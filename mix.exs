@@ -6,6 +6,7 @@ defmodule NxArm.MixProject do
       app: :nx_arm,
       version: "0.1.0",
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       name: "NxArm",
@@ -14,6 +15,9 @@ defmodule NxArm.MixProject do
       package: package()
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   def application do
     [

@@ -929,6 +929,69 @@ pub fn rope_f32(
     Ok(out)
 }
 
+/// Bilinear image resize for HWC uint8 inputs. Common entry point
+/// for vision-model preprocessing: camera/JPEG decode produces a
+/// HxWx3 u8 buffer; the model wants its own resolution. Pure
+/// bilinear interpolation, written as a per-output-pixel gather of
+/// the 4 surrounding source pixels.
+pub fn bilinear_resize_u8(
+    input: &[u8],
+    in_h: usize,
+    in_w: usize,
+    channels: usize,
+    out_h: usize,
+    out_w: usize,
+) -> Result<Vec<u8>, String> {
+    if input.len() != in_h * in_w * channels {
+        return Err(format!(
+            "bilinear_resize: input len {} != H*W*C = {}",
+            input.len(),
+            in_h * in_w * channels
+        ));
+    }
+    if out_h == 0 || out_w == 0 || in_h == 0 || in_w == 0 {
+        return Err("bilinear_resize: zero dimension".into());
+    }
+
+    let mut out = vec![0u8; out_h * out_w * channels];
+
+    let h_scale = (in_h as f32 - 1.0) / (out_h as f32 - 1.0).max(1.0);
+    let w_scale = (in_w as f32 - 1.0) / (out_w as f32 - 1.0).max(1.0);
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(out_w * channels)
+        .enumerate()
+        .for_each(|(oy, row)| {
+            let in_y = oy as f32 * h_scale;
+            let y0 = in_y.floor() as usize;
+            let y1 = (y0 + 1).min(in_h - 1);
+            let dy = in_y - y0 as f32;
+
+            for ox in 0..out_w {
+                let in_x = ox as f32 * w_scale;
+                let x0 = in_x.floor() as usize;
+                let x1 = (x0 + 1).min(in_w - 1);
+                let dx = in_x - x0 as f32;
+
+                for c in 0..channels {
+                    let p00 = input[(y0 * in_w + x0) * channels + c] as f32;
+                    let p01 = input[(y0 * in_w + x1) * channels + c] as f32;
+                    let p10 = input[(y1 * in_w + x0) * channels + c] as f32;
+                    let p11 = input[(y1 * in_w + x1) * channels + c] as f32;
+
+                    let interp = p00 * (1.0 - dx) * (1.0 - dy)
+                        + p01 * dx * (1.0 - dy)
+                        + p10 * (1.0 - dx) * dy
+                        + p11 * dx * dy;
+
+                    row[ox * channels + c] = interp.round() as u8;
+                }
+            }
+        });
+
+    Ok(out)
+}
+
 /// Weight-only int8 matmul: `act` f32 × `weights` int8, per-row
 /// (per-output-channel) f32 scales. Computes
 ///

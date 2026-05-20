@@ -71,6 +71,23 @@ fn transpose_op<'a>(
 /// the trailing dim of `indices`. Most callers (token-embedding
 /// lookup) use `axes = [0]` — that goes through the fast contiguous
 /// memcpy path.
+/// Bilinear resize for HWC u8 image buffers. The image featurizer
+/// entry point for vision models.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn bilinear_resize_u8_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    in_h: usize,
+    in_w: usize,
+    channels: usize,
+    out_h: usize,
+    out_w: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let out = shape_ops::bilinear_resize_u8(input.as_slice(), in_h, in_w, channels, out_h, out_w)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    bytes_to_bin(env, &out)
+}
+
 /// RMSNorm — Llama/Mistral/Phi/Qwen pre-attention/pre-MLP norm.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn rmsnorm_f32_op<'a>(

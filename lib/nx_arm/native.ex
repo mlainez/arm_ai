@@ -194,6 +194,14 @@ defmodule NxArm.Native do
   def depthwise_conv2d_f32_op(_input, _weight, _bias, _dims, _stride, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Bilinear resize for HWC u8 image buffers. Input is `in_h * in_w *
+  channels` bytes; output is `out_h * out_w * channels` bytes.
+  """
+  @spec bilinear_resize_u8_op(binary(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  def bilinear_resize_u8_op(_input, _in_h, _in_w, _channels, _out_h, _out_w),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   @doc "RMSNorm along the last axis. Pre-attention / pre-MLP norm in Llama/Mistral/Phi/Qwen."
   @spec rmsnorm_f32_op(binary(), binary(), non_neg_integer(), non_neg_integer(), float()) :: binary()
   def rmsnorm_f32_op(_input, _gamma, _n_outer, _inner, _epsilon),

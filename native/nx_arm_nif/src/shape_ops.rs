@@ -286,11 +286,9 @@ pub fn concatenate(
 /// [B, K, N] (when `right_transposed == false`) or [B, N, K]
 /// (when `right_transposed == true`). Output is [B, M, N].
 ///
-/// `right_transposed == true` is the attention Q @ K^T pattern: both
-/// inputs contract along their last axis. We implement it natively
-/// (rather than asking the caller to transpose) so the inner loop
-/// stays sequential in both operands' last axis — favourable for
-/// the auto-vectoriser on aarch64.
+/// Standard layout uses a hand-written 4-row × 4-col NEON register
+/// kernel (16 accumulators kept in V registers across the K loop).
+/// Transposed layout (Q @ K^T) uses a 4-way dot-product NEON kernel.
 pub fn batched_matmul_f32(
     left: &[f32],
     right: &[f32],
@@ -319,40 +317,209 @@ pub fn batched_matmul_f32(
 
     let mut out = vec![0.0f32; b * m * n];
 
-    // Parallelise over (batch, row). Each work unit fills one [n] row.
-    out.par_chunks_mut(n).enumerate().for_each(|(bi_row, row)| {
-        let batch = bi_row / m;
-        let i = bi_row % m;
-        let a_base = batch * m * k + i * k;
-        let a = &left[a_base..a_base + k];
-        if right_transposed {
-            // right layout: [B, N, K] — for column j we read right[batch, j, :]
-            let r_batch = batch * n * k;
-            for j in 0..n {
-                let r_base = r_batch + j * k;
-                let r = &right[r_base..r_base + k];
-                let mut acc = 0.0f32;
-                // Sequential f32 dot — autovectorises to NEON FMAs on aarch64.
-                for kk in 0..k {
-                    acc += a[kk] * r[kk];
-                }
-                row[j] = acc;
+    // Parallelise across batches. Each batch slice is independent;
+    // the inner tiled kernel runs single-threaded within one batch so
+    // its register/cache locality isn't shared with other threads.
+    //
+    // For b=1 (the dominant Bumblebee case), this means single-threaded
+    // for the inner matmul — we make up for it by splitting the M-tile
+    // parallelism inside `matmul_2d_*` below.
+    out.par_chunks_mut(m * n)
+        .enumerate()
+        .for_each(|(batch, c_slice)| {
+            let a_slice = &left[batch * m * k..(batch + 1) * m * k];
+
+            if right_transposed {
+                let r_slice = &right[batch * n * k..(batch + 1) * n * k];
+                matmul_2d_neon_qkt(a_slice, r_slice, c_slice, m, n, k);
+            } else {
+                let r_slice = &right[batch * k * n..(batch + 1) * k * n];
+                matmul_2d_neon(a_slice, r_slice, c_slice, m, n, k);
             }
-        } else {
-            // right layout: [B, K, N] — column j is right[batch, :, j].
-            // Process columns in groups to favor cache locality across kk.
-            let r_batch = batch * k * n;
-            for j in 0..n {
-                let mut acc = 0.0f32;
-                for kk in 0..k {
-                    acc += a[kk] * right[r_batch + kk * n + j];
+        });
+
+    Ok(out)
+}
+
+/// Standard 2-D matmul: C[m, n] = A[m, k] @ B[k, n].
+///
+/// 4×4 register-tiled inner kernel via NEON intrinsics on aarch64; the
+/// outer loop over row-tiles is rayon-parallel. Edges where M or N
+/// aren't multiples of 4 are handled by scalar fallback for those
+/// remaining cells only.
+fn matmul_2d_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    let n_tiles = n / 4;
+    let n_tail_start = n_tiles * 4;
+    let m_tiles_count = m / 4;
+    let m_tail_start = m_tiles_count * 4;
+
+    // Transport the mut pointer across threads as a usize — guarantees
+    // Send + Sync without unsafe-impl shenanigans. Disjointness across
+    // the (mi, nj) tile space ensures no two threads ever target the
+    // same output cell, so race-free in practice.
+    let c_addr = c.as_mut_ptr() as usize;
+
+    (0..m_tiles_count).into_par_iter().for_each(|mi| {
+        let row_base = mi * 4;
+        let c_ptr = c_addr as *mut f32;
+        unsafe {
+            for nj in 0..n_tiles {
+                let col_base = nj * 4;
+                matmul_kernel_4x4(a, b, c_ptr, row_base, col_base, n, k);
+            }
+            // N tail (n % 4 columns) for these 4 rows.
+            for col in n_tail_start..n {
+                for row_off in 0..4 {
+                    let row = row_base + row_off;
+                    let a_row = std::slice::from_raw_parts(a.as_ptr().add(row * k), k);
+                    let mut acc = 0.0f32;
+                    for kk in 0..k {
+                        acc += a_row[kk] * b[kk * n + col];
+                    }
+                    *c_ptr.add(row * n + col) = acc;
                 }
-                row[j] = acc;
             }
         }
     });
 
-    Ok(out)
+    // M tail (m % 4 rows): scalar fallback, runs serially after the
+    // parallel section — small enough to not matter.
+    for row in m_tail_start..m {
+        let a_row = &a[row * k..row * k + k];
+        for col in 0..n {
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += a_row[kk] * b[kk * n + col];
+            }
+            c[row * n + col] = acc;
+        }
+    }
+}
+
+/// 4-row × 4-col register-tiled NEON kernel.
+///
+/// Computes C[row_base..row_base+4, col_base..col_base+4] = A·B
+/// where A is row-major [M, K], B is row-major [K, N].
+///
+/// Inner loop reads one 4-wide B vector per K-step and broadcasts
+/// 4 A scalars (one per output row) via vfmaq_n_f32, accumulating
+/// into 4 vector registers held the whole K loop.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn matmul_kernel_4x4(
+    a: &[f32],
+    b: &[f32],
+    c_ptr: *mut f32,
+    row_base: usize,
+    col_base: usize,
+    n: usize,
+    k: usize,
+) {
+    use core::arch::aarch64::*;
+
+    let mut c0 = vdupq_n_f32(0.0);
+    let mut c1 = vdupq_n_f32(0.0);
+    let mut c2 = vdupq_n_f32(0.0);
+    let mut c3 = vdupq_n_f32(0.0);
+
+    let a_row0 = a.as_ptr().add(row_base * k);
+    let a_row1 = a.as_ptr().add((row_base + 1) * k);
+    let a_row2 = a.as_ptr().add((row_base + 2) * k);
+    let a_row3 = a.as_ptr().add((row_base + 3) * k);
+    let b_ptr = b.as_ptr();
+
+    for kk in 0..k {
+        let b_vec = vld1q_f32(b_ptr.add(kk * n + col_base));
+        c0 = vfmaq_n_f32(c0, b_vec, *a_row0.add(kk));
+        c1 = vfmaq_n_f32(c1, b_vec, *a_row1.add(kk));
+        c2 = vfmaq_n_f32(c2, b_vec, *a_row2.add(kk));
+        c3 = vfmaq_n_f32(c3, b_vec, *a_row3.add(kk));
+    }
+
+    vst1q_f32(c_ptr.add(row_base * n + col_base), c0);
+    vst1q_f32(c_ptr.add((row_base + 1) * n + col_base), c1);
+    vst1q_f32(c_ptr.add((row_base + 2) * n + col_base), c2);
+    vst1q_f32(c_ptr.add((row_base + 3) * n + col_base), c3);
+}
+
+/// Scalar fallback for non-aarch64 hosts (e.g. CI on x86_64).
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+unsafe fn matmul_kernel_4x4(
+    a: &[f32],
+    b: &[f32],
+    c_ptr: *mut f32,
+    row_base: usize,
+    col_base: usize,
+    n: usize,
+    k: usize,
+) {
+    for row_off in 0..4 {
+        let row = row_base + row_off;
+        let a_row = &a[row * k..row * k + k];
+        for col_off in 0..4 {
+            let col = col_base + col_off;
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += a_row[kk] * b[kk * n + col];
+            }
+            *c_ptr.add(row * n + col) = acc;
+        }
+    }
+}
+
+/// Q @ K^T pattern: C[m, n] = A[m, k] · B[n, k] (contract on last axis
+/// of both). NEON-vectorised 4-way dot product per (row, col) pair:
+/// for each (row, col) we load 4 K-values from both, FMA into a vector
+/// accumulator, then horizontal-add at the end.
+fn matmul_2d_neon_qkt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    let c_addr = c.as_mut_ptr() as usize;
+
+    (0..m).into_par_iter().for_each(|row| {
+        let c_ptr = c_addr as *mut f32;
+        unsafe {
+            let a_row = a.as_ptr().add(row * k);
+            for col in 0..n {
+                let b_row = b.as_ptr().add(col * k);
+                let acc = dot4_neon(a_row, b_row, k);
+                *c_ptr.add(row * n + col) = acc;
+            }
+        }
+    });
+}
+
+/// 4-wide NEON dot product of two length-K f32 arrays. Tail handled
+/// scalar.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn dot4_neon(a: *const f32, b: *const f32, k: usize) -> f32 {
+    use core::arch::aarch64::*;
+
+    let mut acc = vdupq_n_f32(0.0);
+    let k_tiles = k / 4;
+    let k_tail_start = k_tiles * 4;
+
+    for kk in 0..k_tiles {
+        let av = vld1q_f32(a.add(kk * 4));
+        let bv = vld1q_f32(b.add(kk * 4));
+        acc = vfmaq_f32(acc, av, bv);
+    }
+
+    let mut sum = vaddvq_f32(acc);
+    for kk in k_tail_start..k {
+        sum += *a.add(kk) * *b.add(kk);
+    }
+    sum
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+unsafe fn dot4_neon(a: *const f32, b: *const f32, k: usize) -> f32 {
+    let mut acc = 0.0f32;
+    for kk in 0..k {
+        acc += *a.add(kk) * *b.add(kk);
+    }
+    acc
 }
 
 // ── f32 elementwise (CPU NEON via auto-vectoriser) ──────

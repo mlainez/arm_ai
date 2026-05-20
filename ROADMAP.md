@@ -47,11 +47,10 @@ Single sweep over the `Nx.Defn.Expr` graph before execution.
       that dispatches to the fused NIF. Commit `67a733c`. 12 fusions
       per ViT-tiny forward, but end-to-end win is within noise — the
       primitives are already CPU-NEON fast.
-- [ ] **Phase 2.x — LayerNorm fusion**. Biggest remaining single
-      op (37 ms × 24 calls = 0.9 s per ViT forward). Pattern:
-      `((x - mean(x)) / sqrt(var(x) + eps)) * gamma + beta`.
-- [ ] **Phase 2.x — GELU fusion**. `((erf(x / √2) + 1) * x) / 2`.
-      ~14 ms × 12 calls = 170 ms.
+- [x] **Phase 2.x — LayerNorm + GELU fusion**. Commit `39c1d05`.
+      ViT-tiny warm forward 5.13 s → **3.02 s** (1.7×). Per-forward
+      fusion counts: 12 GELU + 25 LayerNorm + 12 softmax. Pattern
+      matchers handle Nx's constant-commute reordering on add/multiply.
 - [ ] **Phase 3** — pre-allocate intermediate buffers; reuse when
       previous SSA value is dead (saves `Vec<f32>` per op).
 - [ ] Elide redundant `Nx.broadcast` calls (when the broadcast result

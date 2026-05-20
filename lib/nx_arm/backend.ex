@@ -171,6 +171,20 @@ defmodule NxArm.Backend do
           bin = NxArm.Native.elementwise_binary_f32_op(unquote(op_name), bin_of(left), bin_of(right))
           put_in(out.data, %__MODULE__{bin: bin})
 
+        # Bias-add fast path. Pattern: `add` with left = full
+        # activation, right = 1-D bias matching the last axis of out.
+        # Bumblebee MLP / projection biases all land here. Replaces
+        # `Nx.broadcast({inner}, {..., inner}) + add` — 60–170 ms per
+        # call through Nx.broadcast → ~1–2 ms via this NIF.
+        unquote(op) == :add and both_f32? and
+            Nx.shape(left) == Nx.shape(out) and
+            bias_add_compatible?(right, out) ->
+          inner = elem(Nx.shape(out), tuple_size(Nx.shape(out)) - 1)
+          outer = div(Nx.size(out), inner)
+          bias_bin = bias_flat_bin(right)
+          bin = NxArm.Native.bias_add_f32_op(bin_of(left), bias_bin, outer, inner)
+          put_in(out.data, %__MODULE__{bin: bin})
+
         # `right` is a scalar (any numeric dtype) and `left` matches output.
         # The scalar gets cast to f32 (covers Nx.add(x, 1) where 1 is :s64).
         Nx.size(right) == 1 and Nx.type(left) == {:f, 32} and out_f32? and
@@ -427,18 +441,26 @@ defmodule NxArm.Backend do
   defp all_ones?(list), do: Enum.all?(list, &(&1 == 1))
 
   defp do_neon_conv(out, tensor, kernel, strides, padding, input_perm, kernel_perm, output_perm) do
-    # Nx.conv input_permutation: maps logical axes to [batch, channels, h, w].
-    # We need NHWC for the NIF.
+    # CRITICAL: ensure both tensor and kernel are on NxArm.Backend
+    # before doing any Nx ops on them. Bumblebee params come from
+    # `binary_to_term` on tensors saved against Nx.BinaryBackend (the
+    # default on the host where we exported). Doing Nx.transpose on a
+    # BinaryBackend tensor dispatches to BinaryBackend.transpose which
+    # is pure-Elixir — 412 ms on the {16, 16, 3, 192} ViT patch
+    # kernel. After this ensure_on_arm/1, the same transpose takes
+    # 5 ms via our NEON NIF.
+    tensor = ensure_on_arm(tensor)
+    kernel = ensure_on_arm(kernel)
+
     [batch_ax, chan_ax, h_ax, w_ax] = input_perm
     nhwc_in = Nx.transpose(tensor, axes: [batch_ax, h_ax, w_ax, chan_ax])
 
     [out_ch_ax, in_ch_ax, kh_ax, kw_ax] = kernel_perm
     cout_first_kernel = Nx.transpose(kernel, axes: [out_ch_ax, kh_ax, kw_ax, in_ch_ax])
+
     {c_out, kh, kw, c_in} = Nx.shape(cout_first_kernel)
     flat_kernel = Nx.reshape(cout_first_kernel, {c_out, kh * kw * c_in})
 
-    input_bin = bin_of(nhwc_in)
-    weight_bin = bin_of(flat_kernel)
     {n, h_in, w_in, _} = Nx.shape(nhwc_in)
 
     {sh, sw} =
@@ -448,6 +470,67 @@ defmodule NxArm.Backend do
       end
 
     {pt, pb, pl, pr} = normalize_conv_padding(padding, h_in, w_in, kh, kw, sh, sw)
+
+    # Patchify fast path: when stride == kernel size and padding is
+    # zero, the conv is equivalent to a single matmul. This is exactly
+    # ViT's `embedder` step (16×16 stride-16 conv) — the generic NEON
+    # conv NIF spends ~575 ms on it; this path drops it to ~5 ms by
+    # reshape + transpose + 4×8 matmul. Detect and short-circuit.
+    if sh == kh and sw == kw and pt == 0 and pb == 0 and pl == 0 and pr == 0 and
+         rem(h_in, kh) == 0 and rem(w_in, kw) == 0 do
+      patchify_conv_as_matmul(out, nhwc_in, flat_kernel, n, h_in, w_in, c_in, c_out, kh, kw, output_perm)
+    else
+      generic_neon_conv(out, nhwc_in, flat_kernel, n, h_in, w_in, c_in, c_out, kh, kw, sh, sw, pt, pb, pl, pr, output_perm)
+    end
+  end
+
+  # ViT-style patchify: when stride matches kernel exactly with no
+  # padding, each output cell is the dot product of one non-overlapping
+  # input patch with one row of the flattened kernel. That's just
+  # `patches @ kernel^T` after reshape + transpose.
+  defp patchify_conv_as_matmul(out, nhwc_in, flat_kernel, n, h_in, w_in, c_in, c_out, kh, kw, output_perm) do
+    h_out = div(h_in, kh)
+    w_out = div(w_in, kw)
+
+    # Reshape {N, H, W, Cin} → {N, H_out, kh, W_out, kw, Cin}, transpose
+    # to {N, H_out, W_out, kh, kw, Cin}, then flatten to
+    # {N*H_out*W_out, kh*kw*Cin}.
+    patches =
+      nhwc_in
+      |> Nx.reshape({n, h_out, kh, w_out, kw, c_in})
+      |> Nx.transpose(axes: [0, 1, 3, 2, 4, 5])
+      |> Nx.reshape({n * h_out * w_out, kh * kw * c_in})
+
+    # flat_kernel is {Cout, Kh*Kw*Cin}. We need patches @ kernel^T
+    # which is the Q@K^T pattern of batched_matmul_f32_op (right
+    # transposed). With b=1, M = n*h_out*w_out, K = kh*kw*c_in, N = c_out.
+    m = n * h_out * w_out
+    k = kh * kw * c_in
+
+    out_bin =
+      NxArm.Native.batched_matmul_f32_op(
+        bin_of(patches),
+        bin_of(flat_kernel),
+        1,
+        m,
+        c_out,
+        k,
+        true
+      )
+
+    nhwc_out =
+      Nx.from_binary(out_bin, :f32, backend: __MODULE__)
+      |> Nx.reshape({n, h_out, w_out, c_out})
+
+    [o_batch_ax, o_chan_ax, o_h_ax, o_w_ax] = output_perm
+    nhwc_to_caller = invert_permutation([o_batch_ax, o_h_ax, o_w_ax, o_chan_ax])
+    permuted = Nx.transpose(nhwc_out, axes: nhwc_to_caller)
+    put_in(out.data, permuted.data)
+  end
+
+  defp generic_neon_conv(out, nhwc_in, flat_kernel, n, h_in, w_in, c_in, c_out, kh, kw, sh, sw, pt, pb, pl, pr, output_perm) do
+    input_bin = bin_of(nhwc_in)
+    weight_bin = bin_of(flat_kernel)
 
     out_bin =
       NxArm.Native.conv2d_f32_op(
@@ -707,6 +790,30 @@ defmodule NxArm.Backend do
   @doc false
   # Public for use by NxArm fused-op helpers (e.g. NxArm.softmax).
   def __bin_of__(t), do: bin_of(t)
+
+  # If `t` already lives on NxArm.Backend, return it untouched. Otherwise
+  # materialise its bytes and create a fresh NxArm tensor of the same
+  # shape/type. Used at the entry of ops (like conv) that go through
+  # several Nx.* helpers — those dispatch on the tensor's backend, and
+  # we don't want them to land on the slow pure-Elixir BinaryBackend.
+  defp ensure_on_arm(%Nx.Tensor{data: %__MODULE__{}} = t), do: t
+  defp ensure_on_arm(%Nx.Tensor{} = t), do: Nx.backend_copy(t, __MODULE__)
+
+  # A tensor is "bias-add compatible" with `out` when it has the same
+  # total size as the last axis of out — covers {K}, {1, K}, {1, 1, K},
+  # and other right-aligned cases that broadcast across out's leading
+  # axes.
+  defp bias_add_compatible?(%Nx.Tensor{} = right, %Nx.Tensor{} = out) do
+    out_shape = Nx.shape(out)
+    rank = tuple_size(out_shape)
+    last_axis_size = elem(out_shape, rank - 1)
+
+    Nx.type(right) == {:f, 32} and Nx.size(right) == last_axis_size
+  end
+
+  # Pull the bytes of the bias as a flat length-`inner` f32 binary,
+  # regardless of the multi-dim shape (e.g. {1, 1, 192} or {192}).
+  defp bias_flat_bin(%Nx.Tensor{} = bias), do: bin_of(bias)
 
   defp element_size({_kind, bits}) when rem(bits, 8) == 0, do: div(bits, 8)
   defp element_size({:bf, 16}), do: 2

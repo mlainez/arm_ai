@@ -98,6 +98,14 @@ defmodule NxArm.Native do
   @spec elementwise_unary_f32_op(String.t(), binary()) :: binary()
   def elementwise_unary_f32_op(_op, _a), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Fused bias add: `out[i] = act[i] + bias[i mod inner]`. Bypasses
+  `Nx.broadcast`'s wrapper overhead (~60–170 ms/call in our profile)
+  by doing the implicit broadcast inside the NIF.
+  """
+  @spec bias_add_f32_op(binary(), binary(), non_neg_integer(), non_neg_integer()) :: binary()
+  def bias_add_f32_op(_act, _bias, _outer, _inner), do: :erlang.nif_error(:nif_not_loaded)
+
   @doc "Reduce along the last axis. Input is `[n_outer × inner]` row-major; returns `n_outer` f32s."
   @spec reduce_axis_f32_op(String.t(), binary(), non_neg_integer(), non_neg_integer()) :: binary()
   def reduce_axis_f32_op(_op, _input, _n_outer, _inner),

@@ -739,7 +739,74 @@ defmodule NxArm.Compiler do
           {Nx.Shared.list_impl!(args), [ans | args]}
       end
 
-    {apply(mod, op, args), caches}
+    if System.get_env("NXARM_PROFILE_OPS") == "1" do
+      {us, result} = :timer.tc(fn -> apply(mod, op, args) end)
+
+      key =
+        case System.get_env("NXARM_PROFILE_BY_SHAPE") do
+          "1" ->
+            shapes =
+              args
+              |> Enum.filter(&match?(%Nx.Tensor{}, &1))
+              |> Enum.map(&Nx.shape/1)
+
+            {op, shapes}
+
+          _ ->
+            op
+        end
+
+      bump_counter(key, us)
+      {result, caches}
+    else
+      {apply(mod, op, args), caches}
+    end
+  end
+
+  @profile_table :__nxarm_op_profile__
+
+  defp bump_counter(op, us) do
+    table =
+      case :ets.whereis(@profile_table) do
+        :undefined ->
+          :ets.new(@profile_table, [:set, :public, :named_table, write_concurrency: true])
+
+        ref ->
+          ref
+      end
+
+    :ets.update_counter(table, op, [{2, us}, {3, 1}], {op, 0, 0})
+  end
+
+  @doc """
+  Pretty-print the op-time aggregation collected when
+  `NXARM_PROFILE_OPS=1` was set. Resets the table.
+  """
+  def dump_profile() do
+    case :ets.whereis(@profile_table) do
+      :undefined ->
+        IO.puts("no profile data — set NXARM_PROFILE_OPS=1 before running")
+
+      _ref ->
+        rows = :ets.tab2list(@profile_table)
+
+        IO.puts("op                    calls    total_ms   avg_us")
+        IO.puts("--------------------- -------- ---------- --------")
+
+        rows
+        |> Enum.sort_by(fn {_op, us, _n} -> -us end)
+        |> Enum.each(fn {op_key, us, n} ->
+          label = inspect(op_key, limit: :infinity, printable_limit: :infinity)
+          IO.puts(
+            "#{String.pad_leading(to_string(n), 6)}  " <>
+              "#{String.pad_leading(:erlang.float_to_binary(us / 1000, decimals: 1), 10)}ms  " <>
+              "#{String.pad_leading(:erlang.float_to_binary(us / n, decimals: 1), 10)}us  " <>
+              "#{label}"
+          )
+        end)
+
+        :ets.delete_all_objects(@profile_table)
+    end
   end
 
   # ── While / cond plumbing ─────────────────────────────────

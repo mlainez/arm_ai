@@ -179,6 +179,33 @@ fn scalar_binary_f32_op<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
+fn bias_add_f32_op<'a>(
+    env: Env<'a>,
+    act: rustler::Binary<'a>,
+    bias: rustler::Binary<'a>,
+    outer: usize,
+    inner: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let act_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(act.as_ptr() as *const f32, act.len() / 4)
+    };
+    let bias_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(bias.as_ptr() as *const f32, bias.len() / 4)
+    };
+
+    let n = outer * inner;
+    let mut bin = OwnedBinary::new(n * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    {
+        let out_slice: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(bin.as_mut_slice().as_mut_ptr() as *mut f32, n) };
+        shape_ops::bias_add_f32_into(act_slice, bias_slice, out_slice, outer, inner)
+            .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    }
+    Ok(bin.release(env))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 fn elementwise_unary_f32_op<'a>(
     env: Env<'a>,
     op: String,

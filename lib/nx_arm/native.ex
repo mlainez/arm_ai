@@ -194,6 +194,19 @@ defmodule NxArm.Native do
   def depthwise_conv2d_f32_op(_input, _weight, _bias, _dims, _stride, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "RMSNorm along the last axis. Pre-attention / pre-MLP norm in Llama/Mistral/Phi/Qwen."
+  @spec rmsnorm_f32_op(binary(), binary(), non_neg_integer(), non_neg_integer(), float()) :: binary()
+  def rmsnorm_f32_op(_input, _gamma, _n_outer, _inner, _epsilon),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Rotary Position Embedding (RoPE) for Q/K tensors. `positions` is
+  s64 LE. `inv_freq` is the precomputed `1/base^(2k/head_dim)` series.
+  """
+  @spec rope_f32_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  def rope_f32_op(_input, _positions, _inv_freq, _n_rows, _head_dim, _heads_per_token),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   @doc """
   Weight-only int8 matmul: f32 activations × int8 weights × f32 per-row
   scales. Returns f32 output. Layout matches batched_matmul_f32 with

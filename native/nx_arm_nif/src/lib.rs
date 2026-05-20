@@ -71,6 +71,52 @@ fn transpose_op<'a>(
 /// the trailing dim of `indices`. Most callers (token-embedding
 /// lookup) use `axes = [0]` — that goes through the fast contiguous
 /// memcpy path.
+/// RMSNorm — Llama/Mistral/Phi/Qwen pre-attention/pre-MLP norm.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn rmsnorm_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    gamma: rustler::Binary<'a>,
+    n_outer: usize,
+    inner: usize,
+    epsilon: f64,
+) -> NifResult<rustler::Binary<'a>> {
+    let input_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, input.len() / 4)
+    };
+    let gamma_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(gamma.as_ptr() as *const f32, gamma.len() / 4)
+    };
+    let out = shape_ops::rmsnorm_f32(input_slice, gamma_slice, n_outer, inner, epsilon as f32)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+/// Rotary Position Embedding for Q/K tensors.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn rope_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    positions: rustler::Binary<'a>,
+    inv_freq: rustler::Binary<'a>,
+    n_rows: usize,
+    head_dim: usize,
+    heads_per_token: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let input_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, n_rows * head_dim)
+    };
+    let positions_slice: &[i64] = unsafe {
+        std::slice::from_raw_parts(positions.as_ptr() as *const i64, positions.len() / 8)
+    };
+    let inv_freq_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(inv_freq.as_ptr() as *const f32, head_dim / 2)
+    };
+    let out = shape_ops::rope_f32(input_slice, positions_slice, inv_freq_slice, n_rows, head_dim, heads_per_token)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
 /// Weight-only int8 matmul: f32 acts × int8 weights × f32 per-row
 /// scales. Layout matches batched_matmul_f32 with `right_transposed=true`
 /// (acts and weights both contract on last axis).

@@ -792,6 +792,143 @@ fn read_index(bytes: &[u8], size: usize) -> Result<usize, String> {
     }
 }
 
+/// RMSNorm along the last axis. Replaces the Llama/Mistral/Phi/Qwen
+/// pre-attention/pre-MLP normalisation step. Input viewed as
+/// `[n_outer × inner]`; per row computes
+///
+///   `out[i] = (x[i] / sqrt(mean(x²) + eps)) * gamma[i]`
+///
+/// — no mean subtraction (unlike LayerNorm). Single pass per row:
+/// sum-of-squares → invsqrt → scaled multiply.
+pub fn rmsnorm_f32(
+    input: &[f32],
+    gamma: &[f32],
+    n_outer: usize,
+    inner: usize,
+    epsilon: f32,
+) -> Result<Vec<f32>, String> {
+    if input.len() != n_outer * inner {
+        return Err(format!(
+            "rmsnorm: input len {} != n_outer*inner = {}",
+            input.len(),
+            n_outer * inner
+        ));
+    }
+    if gamma.len() != inner {
+        return Err(format!("rmsnorm: gamma len {} != inner {}", gamma.len(), inner));
+    }
+
+    let mut out = vec![0.0f32; n_outer * inner];
+    let inv_n = 1.0_f32 / (inner as f32);
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(inner)
+        .enumerate()
+        .for_each(|(i, row_out)| {
+            let row_in = &input[i * inner..(i + 1) * inner];
+
+            // Pass 1: sum of squares.
+            let mut sumsq = 0.0f32;
+            for &v in row_in {
+                sumsq += v * v;
+            }
+
+            let inv_rms = 1.0_f32 / (sumsq * inv_n + epsilon).sqrt();
+
+            // Pass 2: scale + multiply by gamma.
+            for j in 0..inner {
+                row_out[j] = row_in[j] * inv_rms * gamma[j];
+            }
+        });
+
+    Ok(out)
+}
+
+/// Rotary Position Embedding applied to Q or K tensors.
+///
+/// `input` is the Q/K tensor with shape `[..., n_heads, head_dim]` or
+/// any layout that puts head_dim as the last axis. We treat it
+/// generically as `[n_rows × head_dim]` where each row is one head's
+/// vector for one token. `head_dim` must be even (each consecutive
+/// pair gets rotated).
+///
+/// `positions` is `[n_tokens]` (the position index per token); each
+/// row of `input` belongs to one token. `n_rows` is divided by the
+/// number of heads × batches to map to token positions: we accept
+/// `position_for_row[row] = positions[row / heads_per_token]` via
+/// the `heads_per_token` argument. For typical transformer use:
+///
+///   * input shape `[batch, seq, heads, head_dim]` flattened as
+///     `[batch * seq * heads, head_dim]`
+///   * heads_per_token = `heads`
+///   * positions length = `batch * seq`
+///
+/// `inv_freq` is `[head_dim/2]` — the precomputed `1.0 / base^(2k/head_dim)`.
+pub fn rope_f32(
+    input: &[f32],
+    positions: &[i64],
+    inv_freq: &[f32],
+    n_rows: usize,
+    head_dim: usize,
+    heads_per_token: usize,
+) -> Result<Vec<f32>, String> {
+    if input.len() != n_rows * head_dim {
+        return Err(format!(
+            "rope: input len {} != n_rows*head_dim = {}",
+            input.len(),
+            n_rows * head_dim
+        ));
+    }
+    if head_dim % 2 != 0 {
+        return Err(format!("rope: head_dim {} must be even", head_dim));
+    }
+    if inv_freq.len() != head_dim / 2 {
+        return Err(format!(
+            "rope: inv_freq len {} != head_dim/2 = {}",
+            inv_freq.len(),
+            head_dim / 2
+        ));
+    }
+    let n_tokens = positions.len();
+    if n_rows != n_tokens * heads_per_token {
+        return Err(format!(
+            "rope: n_rows {} != n_tokens * heads_per_token = {}",
+            n_rows,
+            n_tokens * heads_per_token
+        ));
+    }
+
+    let mut out = vec![0.0f32; n_rows * head_dim];
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(head_dim)
+        .enumerate()
+        .for_each(|(row, row_out)| {
+            let token = row / heads_per_token;
+            let pos = positions[token] as f32;
+            let row_in = &input[row * head_dim..(row + 1) * head_dim];
+
+            // Process consecutive pairs (j, j+1). Llama-style RoPE
+            // pairs dim k with k+1; some variants pair k with k+head_dim/2
+            // — we use the original "interleaved" form since it's what
+            // most Bumblebee models will emit through the standard
+            // decomposition path.
+            for k in 0..(head_dim / 2) {
+                let theta = pos * inv_freq[k];
+                let cos = theta.cos();
+                let sin = theta.sin();
+
+                let x0 = row_in[2 * k];
+                let x1 = row_in[2 * k + 1];
+
+                row_out[2 * k] = x0 * cos - x1 * sin;
+                row_out[2 * k + 1] = x0 * sin + x1 * cos;
+            }
+        });
+
+    Ok(out)
+}
+
 /// Weight-only int8 matmul: `act` f32 × `weights` int8, per-row
 /// (per-output-channel) f32 scales. Computes
 ///

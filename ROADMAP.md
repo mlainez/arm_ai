@@ -38,15 +38,31 @@ Driven by the FP3+ ViT-tiny baseline; should generalise to any aarch64.
 
 Single sweep over the `Nx.Defn.Expr` graph before execution.
 
-- [ ] Skeleton compiler that walks Expr, emits NIF-call plan, runs it.
-- [ ] Pattern-fuse softmax / GELU / LayerNorm to single NIF calls
-      (vs hand-detection inside backend).
-- [ ] Pre-allocate intermediate buffers; reuse when previous SSA
-      value is dead (saves `Vec<f32>` per op).
+- [x] **Phase 1** — identity compiler that walks the Expr graph and
+      dispatches op-by-op to NxArm.Backend. (Mirror of Nx.Defn.Evaluator
+      with `__to_backend__/1 → NxArm.Backend`.) Commit `cd2726f`.
+- [x] **Phase 2** — pattern fusion. Bottom-up walk of the Expr graph
+      detects softmax subgraphs (both `e / s` and `(1/s) * e` forms)
+      and replaces them with a single `:nxarm_softmax` custom op
+      that dispatches to the fused NIF. Commit `67a733c`. 12 fusions
+      per ViT-tiny forward, but end-to-end win is within noise — the
+      primitives are already CPU-NEON fast.
+- [ ] **Phase 2.x — LayerNorm fusion**. Biggest remaining single
+      op (37 ms × 24 calls = 0.9 s per ViT forward). Pattern:
+      `((x - mean(x)) / sqrt(var(x) + eps)) * gamma + beta`.
+- [ ] **Phase 2.x — GELU fusion**. `((erf(x / √2) + 1) * x) / 2`.
+      ~14 ms × 12 calls = 170 ms.
+- [ ] **Phase 3** — pre-allocate intermediate buffers; reuse when
+      previous SSA value is dead (saves `Vec<f32>` per op).
 - [ ] Elide redundant `Nx.broadcast` calls (when the broadcast result
       already matches the consumer's needs).
 - [ ] Constant-fold trivial subgraphs (bias broadcasts, scale literals).
-- [ ] Expected gain: another 1.5–2× on warm Bumblebee forwards.
+
+Use: `Nx.Defn.compile(predict_fn, template_args, compiler: NxArm.Compiler)`.
+For Bumblebee/Axon: `Axon.build/2` doesn't itself use the compiler —
+the user must explicitly `Nx.Defn.compile(predict_fn, templates,
+compiler: NxArm.Compiler)` (see Axon's own docs example for the
+EXLA recipe — same idea).
 
 ## Tier 3 — Numerical / hardware
 

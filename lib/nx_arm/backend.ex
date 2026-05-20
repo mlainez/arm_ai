@@ -1,0 +1,720 @@
+defmodule NxArm.Backend do
+  @moduledoc """
+  Nx backend for ARM CPUs via NEON intrinsics + rayon parallelism.
+
+  Tensors are stored as plain Erlang binaries inside an `%NxArm.Backend{}`
+  struct. Every Nx callback dispatches directly to a `NxArm.Native` NIF —
+  no GPU device context, no `buffer_read` / `buffer_write` roundtrips.
+
+  ## Coverage
+
+    * Binary elementwise: `add`, `subtract`, `multiply`, `divide`, `max`,
+      `min`, `pow`, `atan2`, `remainder` — same-shape and scalar broadcast
+    * Unary elementwise: `negate`, `exp`, `log`, `tanh`, `sigmoid`, `abs`,
+      `sqrt`, `rsqrt`, `cbrt`, `expm1`, `log1p`, `sin`, `cos`, `tan`,
+      `asin`, `acos`, `atan`, `sinh`, `cosh`, `asinh`, `acosh`, `atanh`,
+      `ceil`, `floor`, `round`, `sign`, `erf`, `erfc`
+    * Linear algebra: `dot` (2-D via batched matmul with b=1, 3-D+ via
+      fold-into-M, 4-D batched for transformer attention)
+    * Reductions: `sum`, `reduce_max`, `reduce_min` (axis-wise and full)
+    * Shape: `reshape`, `squeeze`, `bitcast` (zero-copy metadata), plus
+      `broadcast`, `transpose`, `concatenate` via dedicated NIFs
+    * Conv2D: `conv/4` via NEON f32 conv NIF
+
+  Other ops fall back to `Nx.BinaryBackend`.
+
+  ## Usage
+
+      Nx.global_default_backend(NxArm.Backend)
+      # or
+      gpu_tensor = Nx.backend_transfer(cpu_tensor, NxArm.Backend)
+  """
+
+  @behaviour Nx.Backend
+
+  defstruct [:bin]
+
+  # ── Lifecycle / transfer ──────────────────────────────────
+
+  @impl true
+  def init(opts), do: opts
+
+  @impl true
+  def from_binary(%Nx.Tensor{} = tensor, binary, _backend_opts) do
+    put_in(tensor.data, %__MODULE__{bin: binary})
+  end
+
+  @impl true
+  def to_binary(%Nx.Tensor{data: %__MODULE__{bin: bin}}, _limit), do: bin
+
+  @impl true
+  def inspect(%Nx.Tensor{} = tensor, opts) do
+    binary = to_binary(tensor, Nx.byte_size(tensor))
+    Nx.Backend.inspect(tensor, binary, opts)
+  end
+
+  @impl true
+  def backend_deallocate(%Nx.Tensor{data: %__MODULE__{}}), do: :ok
+
+  @impl true
+  def backend_copy(tensor, Nx.BinaryBackend, _opts) do
+    Nx.BinaryBackend.from_binary(
+      %{tensor | data: %Nx.BinaryBackend{}},
+      to_binary(tensor, Nx.byte_size(tensor)),
+      []
+    )
+  end
+
+  def backend_copy(tensor, backend, opts) do
+    binary = to_binary(tensor, Nx.byte_size(tensor))
+    backend.from_binary(%{tensor | data: %{__struct__: backend}}, binary, opts)
+  end
+
+  @impl true
+  def backend_transfer(tensor, backend, opts), do: backend_copy(tensor, backend, opts)
+
+  # ── Constant / Eye / Iota ─────────────────────────────────
+
+  @impl true
+  def constant(%Nx.Tensor{} = out, number, backend_opts) do
+    binary = Nx.BinaryBackend.constant(%{out | data: %Nx.BinaryBackend{}}, number, [])
+    from_binary(out, Nx.to_binary(binary), backend_opts)
+  end
+
+  @impl true
+  def eye(%Nx.Tensor{} = out, backend_opts) do
+    cpu = Nx.BinaryBackend.eye(%{out | data: %Nx.BinaryBackend{}}, [])
+    from_binary(out, Nx.to_binary(cpu), backend_opts)
+  end
+
+  @impl true
+  def iota(%Nx.Tensor{} = out, axis, backend_opts) do
+    cpu = Nx.BinaryBackend.iota(%{out | data: %Nx.BinaryBackend{}}, axis, [])
+    from_binary(out, Nx.to_binary(cpu), backend_opts)
+  end
+
+  # ── Shape (zero-copy metadata or fast NIF) ────────────────
+
+  @impl true
+  def reshape(%Nx.Tensor{} = out, %Nx.Tensor{data: %__MODULE__{} = data}) do
+    put_in(out.data, data)
+  end
+
+  @impl true
+  def squeeze(out, tensor, _axes), do: put_in(out.data, tensor.data)
+
+  @impl true
+  def bitcast(%Nx.Tensor{} = out, %Nx.Tensor{data: %__MODULE__{} = data}) do
+    put_in(out.data, data)
+  end
+
+  @impl true
+  def as_type(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor) do
+    if Nx.type(out) == Nx.type(tensor) do
+      put_in(out.data, tensor.data)
+    else
+      fallback(:as_type, [out, tensor])
+    end
+  end
+
+  @impl true
+  def broadcast(out, tensor, shape, axes) do
+    bin = bin_of(tensor)
+    in_shape = Nx.shape(tensor) |> Tuple.to_list()
+    out_shape = shape |> Tuple.to_list()
+    esize = element_size(Nx.type(tensor))
+    out_bin = NxArm.Native.broadcast_op(bin, in_shape, out_shape, axes, esize)
+    put_in(out.data, %__MODULE__{bin: out_bin})
+  end
+
+  @impl true
+  def transpose(out, tensor, axes) do
+    bin = bin_of(tensor)
+    in_shape = Nx.shape(tensor) |> Tuple.to_list()
+    esize = element_size(Nx.type(tensor))
+    out_bin = NxArm.Native.transpose_op(bin, in_shape, axes, esize)
+    put_in(out.data, %__MODULE__{bin: out_bin})
+  end
+
+  @impl true
+  def concatenate(out, tensors, axis) do
+    esize = element_size(Nx.type(hd(tensors)))
+    bins = Enum.map(tensors, &bin_of/1)
+    shapes = Enum.map(tensors, fn t -> Nx.shape(t) |> Tuple.to_list() end)
+    out_bin = NxArm.Native.concatenate_op(bins, shapes, axis, esize)
+    put_in(out.data, %__MODULE__{bin: out_bin})
+  end
+
+  # ── Elementwise Binary Ops ────────────────────────────────
+
+  @binary_ops %{
+    add: "add",
+    subtract: "subtract",
+    multiply: "multiply",
+    divide: "divide",
+    pow: "pow",
+    max: "max",
+    min: "min",
+    atan2: "atan2",
+    remainder: "remainder"
+  }
+
+  for {op, op_name} <- @binary_ops do
+    @impl true
+    def unquote(op)(%Nx.Tensor{} = out, %Nx.Tensor{} = left, %Nx.Tensor{} = right) do
+      both_f32? = Nx.type(left) == {:f, 32} and Nx.type(right) == {:f, 32}
+      out_f32? = Nx.type(out) == {:f, 32}
+
+      cond do
+        # Same-shape f32 — straight NEON kernel.
+        both_f32? and Nx.shape(left) == Nx.shape(out) and Nx.shape(right) == Nx.shape(out) ->
+          bin = NxArm.Native.elementwise_binary_f32_op(unquote(op_name), bin_of(left), bin_of(right))
+          put_in(out.data, %__MODULE__{bin: bin})
+
+        # `right` is a scalar (any numeric dtype) and `left` matches output.
+        # The scalar gets cast to f32 (covers Nx.add(x, 1) where 1 is :s64).
+        Nx.size(right) == 1 and Nx.type(left) == {:f, 32} and out_f32? and
+            Nx.shape(left) == Nx.shape(out) ->
+          bin = NxArm.Native.scalar_binary_f32_op(unquote(op_name), "ab", bin_of(left), to_f32_scalar(right))
+          put_in(out.data, %__MODULE__{bin: bin})
+
+        # `left` is a scalar.
+        Nx.size(left) == 1 and Nx.type(right) == {:f, 32} and out_f32? and
+            Nx.shape(right) == Nx.shape(out) ->
+          bin = NxArm.Native.scalar_binary_f32_op(unquote(op_name), "ba", bin_of(right), to_f32_scalar(left))
+          put_in(out.data, %__MODULE__{bin: bin})
+
+        not both_f32? ->
+          fallback(unquote(op), [out, left, right])
+
+        true ->
+          # General broadcasting — materialise both operands at out_shape
+          # via the fast broadcast NIF, then run same-shape elementwise.
+          left_b = Nx.broadcast(left, Nx.shape(out))
+          right_b = Nx.broadcast(right, Nx.shape(out))
+          bin = NxArm.Native.elementwise_binary_f32_op(unquote(op_name), bin_of(left_b), bin_of(right_b))
+          put_in(out.data, %__MODULE__{bin: bin})
+      end
+    end
+  end
+
+  # ── Elementwise Unary Ops ─────────────────────────────────
+
+  @unary_ops %{
+    negate: "negate",
+    exp: "exp",
+    log: "log",
+    tanh: "tanh",
+    sigmoid: "sigmoid",
+    abs: "abs",
+    sqrt: "sqrt",
+    rsqrt: "rsqrt",
+    cbrt: "cbrt",
+    expm1: "expm1",
+    log1p: "log1p",
+    sin: "sin",
+    cos: "cos",
+    tan: "tan",
+    asin: "asin",
+    acos: "acos",
+    atan: "atan",
+    sinh: "sinh",
+    cosh: "cosh",
+    asinh: "asinh",
+    acosh: "acosh",
+    atanh: "atanh",
+    ceil: "ceil",
+    floor: "floor",
+    round: "round",
+    sign: "sign",
+    erf: "erf",
+    erfc: "erfc"
+  }
+
+  for {op, op_name} <- @unary_ops do
+    @impl true
+    def unquote(op)(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor) do
+      if Nx.type(tensor) == {:f, 32} do
+        bin = NxArm.Native.elementwise_unary_f32_op(unquote(op_name), bin_of(tensor))
+        put_in(out.data, %__MODULE__{bin: bin})
+      else
+        fallback(unquote(op), [out, tensor])
+      end
+    end
+  end
+
+  # ── Dot / Matmul (CPU NEON batched matmul, b=1 covers 2-D) ──
+
+  @impl true
+  def dot(
+        %Nx.Tensor{} = out,
+        %Nx.Tensor{} = left,
+        [left_contract_axis],
+        [],
+        %Nx.Tensor{} = right,
+        [right_contract_axis],
+        []
+      ) do
+    left_shape = Nx.shape(left)
+    right_shape = Nx.shape(right)
+    both_f32? = Nx.type(left) == {:f, 32} and Nx.type(right) == {:f, 32}
+
+    cond do
+      not both_f32? ->
+        fallback(:dot, [out, left, [left_contract_axis], [], right, [right_contract_axis], []])
+
+      # Plain 2-D × 2-D.
+      tuple_size(left_shape) == 2 and tuple_size(right_shape) == 2 and
+          left_contract_axis == 1 and right_contract_axis == 0 ->
+        {m, k} = left_shape
+        {_k, n} = right_shape
+        cpu_matmul_2d(out, left, right, m, n, k)
+
+      # 3-D+ × 2-D — Axon/Bumblebee Linear pattern. Fold leading dims
+      # into M and use the same path; the output buffer is laid out
+      # [m, n] contiguous, reshape is metadata-only.
+      tuple_size(right_shape) == 2 and right_contract_axis == 0 and
+          left_contract_axis == tuple_size(left_shape) - 1 ->
+        {_, n} = right_shape
+        k = elem(left_shape, tuple_size(left_shape) - 1)
+        lead = left_shape |> Tuple.delete_at(tuple_size(left_shape) - 1)
+        m = lead |> Tuple.to_list() |> Enum.reduce(1, &(&1 * &2))
+
+        flat_out = %Nx.Tensor{shape: {m, n}, type: {:f, 32}, names: [nil, nil]}
+        flat = cpu_matmul_2d(flat_out, left, right, m, n, k)
+        reshaped = Nx.reshape(flat, Nx.shape(out))
+        put_in(out.data, reshaped.data)
+
+      true ->
+        fallback(:dot, [out, left, [left_contract_axis], [], right, [right_contract_axis], []])
+    end
+  end
+
+  # Batched 4-D dot for transformer attention: Q @ K^T and attn @ V.
+  def dot(out, left, left_contract, left_batch, right, right_contract, right_batch) do
+    left_shape = Nx.shape(left)
+    right_shape = Nx.shape(right)
+    l_rank = tuple_size(left_shape)
+    r_rank = tuple_size(right_shape)
+    both_f32? = Nx.type(left) == {:f, 32} and Nx.type(right) == {:f, 32}
+
+    cond do
+      not both_f32? or l_rank < 3 or l_rank != r_rank ->
+        fallback(:dot, [out, left, left_contract, left_batch, right, right_contract, right_batch])
+
+      true ->
+        batch_count = l_rank - 2
+        expected_batch = Enum.to_list(0..(batch_count - 1))
+
+        left_batch_dims = left_shape |> Tuple.to_list() |> Enum.take(batch_count)
+        right_batch_dims = right_shape |> Tuple.to_list() |> Enum.take(batch_count)
+
+        cond do
+          left_batch != expected_batch or right_batch != expected_batch ->
+            fallback(:dot, [out, left, left_contract, left_batch, right, right_contract, right_batch])
+
+          left_batch_dims != right_batch_dims ->
+            fallback(:dot, [out, left, left_contract, left_batch, right, right_contract, right_batch])
+
+          left_contract == [l_rank - 1] and right_contract == [r_rank - 1] ->
+            batched_matmul(out, left, right, true)
+
+          left_contract == [l_rank - 1] and right_contract == [r_rank - 2] ->
+            batched_matmul(out, left, right, false)
+
+          true ->
+            fallback(:dot, [out, left, left_contract, left_batch, right, right_contract, right_batch])
+        end
+    end
+  end
+
+  defp cpu_matmul_2d(out, left, right, m, n, k) do
+    bin = NxArm.Native.batched_matmul_f32_op(bin_of(left), bin_of(right), 1, m, n, k, false)
+    put_in(out.data, %__MODULE__{bin: bin})
+  end
+
+  defp batched_matmul(out, left, right, right_transposed?) do
+    left_shape = Nx.shape(left) |> Tuple.to_list()
+    right_shape = Nx.shape(right) |> Tuple.to_list()
+    rank = length(left_shape)
+    batch_dims = Enum.take(left_shape, rank - 2)
+    b = Enum.reduce(batch_dims, 1, &(&1 * &2))
+    m = Enum.at(left_shape, rank - 2)
+    k = Enum.at(left_shape, rank - 1)
+
+    n =
+      if right_transposed? do
+        Enum.at(right_shape, rank - 2)
+      else
+        Enum.at(right_shape, rank - 1)
+      end
+
+    bin =
+      NxArm.Native.batched_matmul_f32_op(
+        bin_of(left),
+        bin_of(right),
+        b,
+        m,
+        n,
+        k,
+        right_transposed?
+      )
+
+    put_in(out.data, %__MODULE__{bin: bin})
+  end
+
+  # ── Reductions ────────────────────────────────────────────
+
+  for {nx_fn, op_name} <- [sum: "sum", reduce_max: "max", reduce_min: "min"] do
+    @impl true
+    def unquote(nx_fn)(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor, opts) do
+      do_reduce(unquote(nx_fn), unquote(op_name), out, tensor, opts)
+    end
+  end
+
+  defp do_reduce(nx_fn, op_name, out, tensor, opts) do
+    axes = opts[:axes]
+    rank = tuple_size(Nx.shape(tensor))
+    last_axis = rank - 1
+
+    cond do
+      Nx.type(tensor) != {:f, 32} ->
+        fallback(nx_fn, [out, tensor, opts])
+
+      axes == nil or axes == Nx.axes(tensor) ->
+        # Full reduce: treat as n_outer=1, inner=total.
+        total = Nx.size(tensor)
+        bin = NxArm.Native.reduce_axis_f32_op(op_name, bin_of(tensor), 1, total)
+        put_in(out.data, %__MODULE__{bin: bin})
+
+      axes == [last_axis] ->
+        total = Nx.size(tensor)
+        inner = elem(Nx.shape(tensor), last_axis)
+        n_out = div(total, inner)
+        bin = NxArm.Native.reduce_axis_f32_op(op_name, bin_of(tensor), n_out, inner)
+        put_in(out.data, %__MODULE__{bin: bin})
+
+      true ->
+        fallback(nx_fn, [out, tensor, opts])
+    end
+  end
+
+  # ── Conv2D ────────────────────────────────────────────────
+
+  @impl true
+  def conv(out, tensor, kernel, opts) do
+    strides = opts[:strides] || [1, 1]
+    padding = opts[:padding] || []
+    input_dilation = opts[:input_dilation] || [1, 1]
+    kernel_dilation = opts[:kernel_dilation] || [1, 1]
+    feature_group_size = opts[:feature_group_size] || 1
+    batch_group_size = opts[:batch_group_size] || 1
+    input_perm = opts[:input_permutation] || Enum.to_list(0..(tuple_size(Nx.shape(tensor)) - 1))
+    kernel_perm = opts[:kernel_permutation] || Enum.to_list(0..(tuple_size(Nx.shape(kernel)) - 1))
+    output_perm = opts[:output_permutation] || Enum.to_list(0..(tuple_size(Nx.shape(out)) - 1))
+
+    cond do
+      tuple_size(Nx.shape(tensor)) != 4 -> fallback(:conv, [out, tensor, kernel, opts])
+      tuple_size(Nx.shape(kernel)) != 4 -> fallback(:conv, [out, tensor, kernel, opts])
+      not all_ones?(input_dilation) -> fallback(:conv, [out, tensor, kernel, opts])
+      not all_ones?(kernel_dilation) -> fallback(:conv, [out, tensor, kernel, opts])
+      feature_group_size != 1 -> fallback(:conv, [out, tensor, kernel, opts])
+      batch_group_size != 1 -> fallback(:conv, [out, tensor, kernel, opts])
+      true -> do_neon_conv(out, tensor, kernel, strides, padding, input_perm, kernel_perm, output_perm)
+    end
+  end
+
+  defp all_ones?(list), do: Enum.all?(list, &(&1 == 1))
+
+  defp do_neon_conv(out, tensor, kernel, strides, padding, input_perm, kernel_perm, output_perm) do
+    # Nx.conv input_permutation: maps logical axes to [batch, channels, h, w].
+    # We need NHWC for the NIF.
+    [batch_ax, chan_ax, h_ax, w_ax] = input_perm
+    nhwc_in = Nx.transpose(tensor, axes: [batch_ax, h_ax, w_ax, chan_ax])
+
+    [out_ch_ax, in_ch_ax, kh_ax, kw_ax] = kernel_perm
+    cout_first_kernel = Nx.transpose(kernel, axes: [out_ch_ax, kh_ax, kw_ax, in_ch_ax])
+    {c_out, kh, kw, c_in} = Nx.shape(cout_first_kernel)
+    flat_kernel = Nx.reshape(cout_first_kernel, {c_out, kh * kw * c_in})
+
+    input_bin = bin_of(nhwc_in)
+    weight_bin = bin_of(flat_kernel)
+    {n, h_in, w_in, _} = Nx.shape(nhwc_in)
+
+    {sh, sw} =
+      case strides do
+        [a, b] -> {a, b}
+        a when is_integer(a) -> {a, a}
+      end
+
+    {pt, pb, pl, pr} = normalize_conv_padding(padding, h_in, w_in, kh, kw, sh, sw)
+
+    out_bin =
+      NxArm.Native.conv2d_f32_op(
+        input_bin,
+        weight_bin,
+        <<>>,
+        [n, h_in, w_in, c_in, c_out, kh, kw],
+        [sh, sw],
+        [pt, pb, pl, pr]
+      )
+
+    h_out = div(h_in + pt + pb - kh, sh) + 1
+    w_out = div(w_in + pl + pr - kw, sw) + 1
+
+    nhwc_out =
+      Nx.from_binary(out_bin, :f32, backend: __MODULE__)
+      |> Nx.reshape({n, h_out, w_out, c_out})
+
+    [o_batch_ax, o_chan_ax, o_h_ax, o_w_ax] = output_perm
+    nhwc_to_caller = invert_permutation([o_batch_ax, o_h_ax, o_w_ax, o_chan_ax])
+    permuted = Nx.transpose(nhwc_out, axes: nhwc_to_caller)
+    put_in(out.data, permuted.data)
+  end
+
+  defp normalize_conv_padding(:valid, _, _, _, _, _, _), do: {0, 0, 0, 0}
+
+  defp normalize_conv_padding(:same, h, w, kh, kw, sh, sw) do
+    pad_h = max(0, (Float.ceil(h / sh) |> trunc()) * sh - h + kh - sh)
+    pad_w = max(0, (Float.ceil(w / sw) |> trunc()) * sw - w + kw - sw)
+    {div(pad_h, 2), pad_h - div(pad_h, 2), div(pad_w, 2), pad_w - div(pad_w, 2)}
+  end
+
+  defp normalize_conv_padding([{pt, pb}, {pl, pr}], _, _, _, _, _, _), do: {pt, pb, pl, pr}
+  defp normalize_conv_padding([], _, _, _, _, _, _), do: {0, 0, 0, 0}
+
+  defp invert_permutation(perm) do
+    perm
+    |> Enum.with_index()
+    |> Enum.sort_by(fn {axis, _} -> axis end)
+    |> Enum.map(fn {_, src} -> src end)
+  end
+
+  # ── Everything else: fallback to BinaryBackend ────────────
+
+  @all_binary_fallbacks [
+    :pow, :remainder, :atan2, :min, :max,
+    :quotient, :bitwise_and, :bitwise_or, :bitwise_xor,
+    :left_shift, :right_shift,
+    :equal, :not_equal, :greater, :less, :greater_equal, :less_equal,
+    :logical_and, :logical_or, :logical_xor
+  ]
+
+  @fallback_binary_ops @all_binary_fallbacks -- Map.keys(@binary_ops)
+
+  for op <- @fallback_binary_ops do
+    @impl true
+    def unquote(op)(out, left, right) do
+      fallback(unquote(op), [out, left, right])
+    end
+  end
+
+  @all_unary_ops Enum.map(Nx.Shared.unary_math_funs(), &elem(&1, 0)) ++
+                   [
+                     :bitwise_not,
+                     :ceil,
+                     :conjugate,
+                     :floor,
+                     :round,
+                     :sign,
+                     :count_leading_zeros,
+                     :population_count,
+                     :real,
+                     :imag,
+                     :is_nan,
+                     :is_infinity,
+                     :logical_not,
+                     :phase
+                   ]
+
+  @fallback_unary_ops @all_unary_ops -- Map.keys(@unary_ops)
+
+  for op <- @fallback_unary_ops do
+    @impl true
+    def unquote(op)(out, tensor) do
+      fallback(unquote(op), [out, tensor])
+    end
+  end
+
+  @impl true
+  def pad(out, tensor, pad_value, padding_config),
+    do: fallback(:pad, [out, tensor, pad_value, padding_config])
+
+  @impl true
+  def reverse(out, tensor, axes), do: fallback(:reverse, [out, tensor, axes])
+
+  @impl true
+  def clip(out, tensor, min, max), do: fallback(:clip, [out, tensor, min, max])
+
+  @impl true
+  def slice(out, tensor, starts, lengths, strides),
+    do: fallback(:slice, [out, tensor, starts, lengths, strides])
+
+  @impl true
+  def put_slice(out, tensor, start_tensor, starts),
+    do: fallback(:put_slice, [out, tensor, start_tensor, starts])
+
+  @impl true
+  def gather(out, input, indices, opts), do: fallback(:gather, [out, input, indices, opts])
+
+  @impl true
+  def stack(out, tensors, axis), do: fallback(:stack, [out, tensors, axis])
+
+  @impl true
+  def select(out, pred, on_true, on_false),
+    do: fallback(:select, [out, pred, on_true, on_false])
+
+  @impl true
+  def all(out, tensor, opts), do: fallback(:all, [out, tensor, opts])
+
+  @impl true
+  def any(out, tensor, opts), do: fallback(:any, [out, tensor, opts])
+
+  @impl true
+  def product(out, tensor, opts), do: fallback(:product, [out, tensor, opts])
+
+  @impl true
+  def argmax(out, tensor, opts), do: fallback(:argmax, [out, tensor, opts])
+
+  @impl true
+  def argmin(out, tensor, opts), do: fallback(:argmin, [out, tensor, opts])
+
+  @impl true
+  def reduce(out, tensor, acc, opts, fun),
+    do: fallback(:reduce, [out, tensor, acc, opts, fun])
+
+  @impl true
+  def window_reduce(out, tensor, acc, shape, opts, fun),
+    do: fallback(:window_reduce, [out, tensor, acc, shape, opts, fun])
+
+  @impl true
+  def window_sum(out, tensor, shape, opts),
+    do: fallback(:window_sum, [out, tensor, shape, opts])
+
+  @impl true
+  def window_product(out, tensor, shape, opts),
+    do: fallback(:window_product, [out, tensor, shape, opts])
+
+  @impl true
+  def window_max(out, tensor, shape, opts),
+    do: fallback(:window_max, [out, tensor, shape, opts])
+
+  @impl true
+  def window_min(out, tensor, shape, opts),
+    do: fallback(:window_min, [out, tensor, shape, opts])
+
+  @impl true
+  def sort(out, tensor, opts), do: fallback(:sort, [out, tensor, opts])
+
+  @impl true
+  def argsort(out, tensor, opts), do: fallback(:argsort, [out, tensor, opts])
+
+  @impl true
+  def window_scatter_max(out, tensor, source, init, shape, opts),
+    do: fallback(:window_scatter_max, [out, tensor, source, init, shape, opts])
+
+  @impl true
+  def window_scatter_min(out, tensor, source, init, shape, opts),
+    do: fallback(:window_scatter_min, [out, tensor, source, init, shape, opts])
+
+  @impl true
+  def indexed_add(out, tensor, indices, updates, opts),
+    do: fallback(:indexed_add, [out, tensor, indices, updates, opts])
+
+  @impl true
+  def indexed_put(out, tensor, indices, updates, opts),
+    do: fallback(:indexed_put, [out, tensor, indices, updates, opts])
+
+  @impl true
+  def fft(out, tensor, opts), do: fallback(:fft, [out, tensor, opts])
+
+  @impl true
+  def ifft(out, tensor, opts), do: fallback(:ifft, [out, tensor, opts])
+
+  @impl true
+  def triangular_solve(out, a, b, opts),
+    do: fallback(:triangular_solve, [out, a, b, opts])
+
+  @impl true
+  def lu(out, tensor, opts), do: fallback(:lu, [out, tensor, opts])
+
+  @impl true
+  def to_batched(out, tensor, opts), do: fallback(:to_batched, [out, tensor, opts])
+
+  @impl true
+  def from_pointer(_out, _pointer, _backend_opts, _offset, _byte_size) do
+    raise "NxArm does not support from_pointer"
+  end
+
+  @impl true
+  def to_pointer(_tensor, _opts) do
+    raise "NxArm does not support to_pointer"
+  end
+
+  @impl true
+  def block(out, tensor, _opts, fun) do
+    # Defn block callback — we just call the function with the tensor.
+    %{out | data: fun.(tensor).data}
+  end
+
+  # ── Internal helpers ──────────────────────────────────────
+
+  defp bin_of(%Nx.Tensor{data: %__MODULE__{bin: bin}}) when not is_nil(bin), do: bin
+  defp bin_of(%Nx.Tensor{} = t), do: Nx.to_binary(t)
+
+  defp element_size({_kind, bits}) when rem(bits, 8) == 0, do: div(bits, 8)
+  defp element_size({:bf, 16}), do: 2
+
+  defp to_f32_scalar(%Nx.Tensor{} = t) do
+    bin = bin_of(t)
+
+    case Nx.type(t) do
+      {:f, 32} -> <<v::float-little-32>> = bin; v
+      {:f, 64} -> <<v::float-little-64>> = bin; v
+      {:bf, 16} ->
+        <<bf::little-16>> = bin
+        <<v::float-little-32>> = <<bf::little-16, 0::little-16>>
+        v
+      {:s, 64} -> <<v::little-signed-64>> = bin; v * 1.0
+      {:s, 32} -> <<v::little-signed-32>> = bin; v * 1.0
+      {:s, 16} -> <<v::little-signed-16>> = bin; v * 1.0
+      {:s, 8} -> <<v::signed-8>> = bin; v * 1.0
+      {:u, 64} -> <<v::little-unsigned-64>> = bin; v * 1.0
+      {:u, 32} -> <<v::little-unsigned-32>> = bin; v * 1.0
+      {:u, 16} -> <<v::little-unsigned-16>> = bin; v * 1.0
+      {:u, 8} -> <<v::unsigned-8>> = bin; v * 1.0
+      other -> raise "NxArm: to_f32_scalar can't convert dtype #{inspect(other)}"
+    end
+  end
+
+  defp fallback(callback, args) do
+    cpu_args = Enum.map(args, &to_cpu_arg/1)
+
+    if System.get_env("NXARM_TRACE_FALLBACK") == "1" do
+      shapes =
+        cpu_args
+        |> Enum.filter(&match?(%Nx.Tensor{}, &1))
+        |> Enum.map(&Nx.shape/1)
+
+      IO.puts("[NxArm fallback] #{callback} shapes=#{inspect(shapes)}")
+    end
+
+    case apply(Nx.BinaryBackend, callback, cpu_args) do
+      %Nx.Tensor{} = t -> to_nx_arm(t)
+      other -> other
+    end
+  end
+
+  defp to_cpu_arg(%Nx.Tensor{data: %__MODULE__{bin: bin}} = t) when not is_nil(bin) do
+    Nx.BinaryBackend.from_binary(%{t | data: %Nx.BinaryBackend{}}, bin, [])
+  end
+
+  defp to_cpu_arg(%Nx.Tensor{data: %__MODULE__{}} = t) do
+    %{t | data: %Nx.BinaryBackend{}}
+  end
+
+  defp to_cpu_arg(list) when is_list(list), do: Enum.map(list, &to_cpu_arg/1)
+  defp to_cpu_arg(other), do: other
+
+  defp to_nx_arm(%Nx.Tensor{} = t), do: put_in(t.data, %__MODULE__{bin: Nx.to_binary(t)})
+end

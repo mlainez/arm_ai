@@ -1,0 +1,303 @@
+// nx_arm — Nx backend for ARM CPUs via NEON intrinsics + rayon.
+//
+// Pure-CPU compute: no OpenCL, no GPU, no device context. Every NIF
+// takes raw `Binary` bytes in, returns raw `Binary` bytes out. The
+// Elixir backend (NxArm.Backend) stores tensors as plain binaries
+// and dispatches each Nx callback to one of these.
+
+mod conv_int8;
+mod shape_ops;
+
+use rustler::{Env, NifResult, OwnedBinary};
+
+// ── helpers ─────────────────────────────────────────────
+
+fn f32_vec_to_bin<'a>(env: Env<'a>, v: &[f32]) -> NifResult<rustler::Binary<'a>> {
+    let bytes = v.len() * 4;
+    let mut bin = OwnedBinary::new(bytes)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let src: &[u8] = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, bytes) };
+    bin.as_mut_slice().copy_from_slice(src);
+    Ok(bin.release(env))
+}
+
+fn bytes_to_bin<'a>(env: Env<'a>, v: &[u8]) -> NifResult<rustler::Binary<'a>> {
+    let mut bin = OwnedBinary::new(v.len())
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    bin.as_mut_slice().copy_from_slice(v);
+    Ok(bin.release(env))
+}
+
+// ── shape ops (dtype-agnostic via element_size) ─────────
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn broadcast_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    in_shape: Vec<usize>,
+    out_shape: Vec<usize>,
+    axes: Vec<usize>,
+    element_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let out = shape_ops::broadcast(input.as_slice(), &in_shape, &out_shape, &axes, element_size)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    bytes_to_bin(env, &out)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn transpose_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    in_shape: Vec<usize>,
+    axes: Vec<usize>,
+    element_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let out = shape_ops::transpose(input.as_slice(), &in_shape, &axes, element_size)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    bytes_to_bin(env, &out)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn concatenate_op<'a>(
+    env: Env<'a>,
+    tensors: Vec<rustler::Binary<'a>>,
+    shapes: Vec<Vec<usize>>,
+    axis: usize,
+    element_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    if tensors.len() != shapes.len() {
+        return Err(rustler::Error::Term(Box::new(format!(
+            "tensors len {} != shapes len {}",
+            tensors.len(),
+            shapes.len()
+        ))));
+    }
+    let slices: Vec<&[u8]> = tensors.iter().map(|b| b.as_slice()).collect();
+    let out = shape_ops::concatenate(&slices, &shapes, axis, element_size)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    bytes_to_bin(env, &out)
+}
+
+// ── f32 matmul (batched, b=1 covers the 2-D case) ───────
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn batched_matmul_f32_op<'a>(
+    env: Env<'a>,
+    left: rustler::Binary<'a>,
+    right: rustler::Binary<'a>,
+    b: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    right_transposed: bool,
+) -> NifResult<rustler::Binary<'a>> {
+    let need_left = b * m * k;
+    let need_right = b * k * n;
+    if left.len() != need_left * 4 {
+        return Err(rustler::Error::Term(Box::new(format!(
+            "left bytes {} != B*M*K*4 = {}",
+            left.len(),
+            need_left * 4
+        ))));
+    }
+    if right.len() != need_right * 4 {
+        return Err(rustler::Error::Term(Box::new(format!(
+            "right bytes {} != B*K*N*4 (or B*N*K*4) = {}",
+            right.len(),
+            need_right * 4
+        ))));
+    }
+
+    let left_f32: &[f32] =
+        unsafe { std::slice::from_raw_parts(left.as_ptr() as *const f32, need_left) };
+    let right_f32: &[f32] =
+        unsafe { std::slice::from_raw_parts(right.as_ptr() as *const f32, need_right) };
+
+    let out = shape_ops::batched_matmul_f32(left_f32, right_f32, b, m, n, k, right_transposed)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+
+    f32_vec_to_bin(env, &out)
+}
+
+// ── f32 elementwise binary / scalar / unary ─────────────
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn elementwise_binary_f32_op<'a>(
+    env: Env<'a>,
+    op: String,
+    a: rustler::Binary<'a>,
+    b: rustler::Binary<'a>,
+) -> NifResult<rustler::Binary<'a>> {
+    let n = a.len() / 4;
+    let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, n) };
+    let b_slice: &[f32] =
+        unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f32, b.len() / 4) };
+    let out = shape_ops::elementwise_binary_f32(&op, a_slice, b_slice)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn scalar_binary_f32_op<'a>(
+    env: Env<'a>,
+    op: String,
+    side: String,
+    a: rustler::Binary<'a>,
+    scalar: f64,
+) -> NifResult<rustler::Binary<'a>> {
+    let a_slice: &[f32] =
+        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, a.len() / 4) };
+    let out = shape_ops::scalar_binary_f32(&op, &side, a_slice, scalar as f32)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn elementwise_unary_f32_op<'a>(
+    env: Env<'a>,
+    op: String,
+    a: rustler::Binary<'a>,
+) -> NifResult<rustler::Binary<'a>> {
+    let a_slice: &[f32] =
+        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, a.len() / 4) };
+    let out = shape_ops::elementwise_unary_f32(&op, a_slice)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn reduce_axis_f32_op<'a>(
+    env: Env<'a>,
+    op: String,
+    input: rustler::Binary<'a>,
+    n_outer: usize,
+    inner: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let input_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, input.len() / 4)
+    };
+    let out = shape_ops::reduce_axis_f32(&op, input_slice, n_outer, inner)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+// ── conv2d (NEON int8 + f32) ────────────────────────────
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn conv2d_int8_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    weight: rustler::Binary<'a>,
+    scales: rustler::Binary<'a>,
+    bias: rustler::Binary<'a>,
+    dims: Vec<usize>,
+    stride: Vec<usize>,
+    padding: Vec<usize>,
+) -> NifResult<rustler::Binary<'a>> {
+    if dims.len() != 7 {
+        return Err(rustler::Error::Term(Box::new(
+            "dims must be [N, H, W, Cin, Cout, Kh, Kw]".to_string(),
+        )));
+    }
+    if stride.len() != 2 || padding.len() != 4 {
+        return Err(rustler::Error::Term(Box::new(
+            "stride must be 2 ints, padding 4".to_string(),
+        )));
+    }
+
+    let (n, h_in, w_in, c_in, c_out, kh, kw) =
+        (dims[0], dims[1], dims[2], dims[3], dims[4], dims[5], dims[6]);
+    let (stride_h, stride_w) = (stride[0], stride[1]);
+    let (pad_top, pad_bottom, pad_left, pad_right) =
+        (padding[0], padding[1], padding[2], padding[3]);
+
+    let (h_out, w_out) = conv_int8::output_dims(
+        h_in, w_in, kh, kw, stride_h, stride_w, pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    let input_f32: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, n * h_in * w_in * c_in)
+    };
+    let weight_i8: &[i8] = unsafe {
+        std::slice::from_raw_parts(weight.as_ptr() as *const i8, c_out * kh * kw * c_in)
+    };
+    let scales_f32: &[f32] =
+        unsafe { std::slice::from_raw_parts(scales.as_ptr() as *const f32, c_out) };
+
+    let bias_slice: Option<&[f32]> = if bias.is_empty() {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(bias.as_ptr() as *const f32, c_out) })
+    };
+
+    let out_n = n * h_out * w_out * c_out;
+    let mut out_bin = OwnedBinary::new(out_n * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let out_f32: &mut [f32] = unsafe {
+        std::slice::from_raw_parts_mut(out_bin.as_mut_slice().as_mut_ptr() as *mut f32, out_n)
+    };
+
+    conv_int8::conv2d_int8(
+        input_f32, weight_i8, scales_f32, bias_slice, out_f32,
+        n, h_in, w_in, c_in, c_out, kh, kw,
+        stride_h, stride_w, pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn conv2d_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    weight: rustler::Binary<'a>,
+    bias: rustler::Binary<'a>,
+    dims: Vec<usize>,
+    stride: Vec<usize>,
+    padding: Vec<usize>,
+) -> NifResult<rustler::Binary<'a>> {
+    if dims.len() != 7 || stride.len() != 2 || padding.len() != 4 {
+        return Err(rustler::Error::Term(Box::new(
+            "bad dims/stride/padding".to_string(),
+        )));
+    }
+
+    let (n, h_in, w_in, c_in, c_out, kh, kw) =
+        (dims[0], dims[1], dims[2], dims[3], dims[4], dims[5], dims[6]);
+    let (stride_h, stride_w) = (stride[0], stride[1]);
+    let (pad_top, pad_bottom, pad_left, pad_right) =
+        (padding[0], padding[1], padding[2], padding[3]);
+
+    let (h_out, w_out) = conv_int8::output_dims(
+        h_in, w_in, kh, kw, stride_h, stride_w, pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    let input_f32: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, n * h_in * w_in * c_in)
+    };
+    let weight_f32: &[f32] = unsafe {
+        std::slice::from_raw_parts(weight.as_ptr() as *const f32, c_out * kh * kw * c_in)
+    };
+    let bias_slice: Option<&[f32]> = if bias.is_empty() {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(bias.as_ptr() as *const f32, c_out) })
+    };
+
+    let out_n = n * h_out * w_out * c_out;
+    let mut out_bin = OwnedBinary::new(out_n * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let out_f32: &mut [f32] = unsafe {
+        std::slice::from_raw_parts_mut(out_bin.as_mut_slice().as_mut_ptr() as *mut f32, out_n)
+    };
+
+    conv_int8::conv2d_f32(
+        input_f32, weight_f32, bias_slice, out_f32,
+        n, h_in, w_in, c_in, c_out, kh, kw,
+        stride_h, stride_w, pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    Ok(out_bin.release(env))
+}
+
+rustler::init!("Elixir.NxArm.Native");

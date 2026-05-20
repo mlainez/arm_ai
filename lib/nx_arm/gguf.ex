@@ -50,7 +50,8 @@ defmodule NxArm.GGUF do
     :metadata,
     :tensors,
     :data_offset,
-    :file_contents
+    :file_contents,
+    :mmap_handle
   ]
 
   @type tensor_info :: %{
@@ -66,7 +67,8 @@ defmodule NxArm.GGUF do
           metadata: map(),
           tensors: %{String.t() => tensor_info()},
           data_offset: non_neg_integer(),
-          file_contents: binary()
+          file_contents: binary() | nil,
+          mmap_handle: reference() | nil
         }
 
   @doc """
@@ -78,6 +80,37 @@ defmodule NxArm.GGUF do
     case File.read(path) do
       {:ok, bin} -> parse(bin)
       {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  Memory-mapped GGUF reader. Parses the header + tensor catalogue
+  from the file, then keeps an mmap handle so per-tensor reads page
+  in from disk lazily. The right choice for multi-GB models on
+  RAM-constrained devices.
+  """
+  @spec read_mmap(Path.t()) :: {:ok, t()} | {:error, term()}
+  def read_mmap(path) do
+    try do
+      {handle, file_size} = NxArm.Native.mmap_open_op(path)
+      # Pull just enough head bytes to cover header + metadata +
+      # tensor catalogue; the catalogue grows with tensor count, not
+      # weight bytes, so 4 MiB is plenty for real models. Cap at
+      # actual file size for small files / tests.
+      head_size = min(4_194_304, file_size)
+      head = NxArm.Native.mmap_slice_op(handle, 0, head_size)
+
+      case parse(head) do
+        {:ok, %__MODULE__{} = parsed} ->
+          {:ok, %{parsed | mmap_handle: handle, file_contents: nil}}
+
+        err ->
+          err
+      end
+    rescue
+      e -> {:error, e}
+    catch
+      :error, reason -> {:error, reason}
     end
   end
 
@@ -116,10 +149,22 @@ defmodule NxArm.GGUF do
   the GGML block layout (see gguf.md for the format of each block).
   """
   @spec tensor_bytes(t(), String.t()) :: {:ok, binary()} | {:error, :not_found}
-  def tensor_bytes(%__MODULE__{tensors: ts, data_offset: base, file_contents: bin}, name) do
+  def tensor_bytes(%__MODULE__{tensors: ts, data_offset: base} = gguf, name) do
     case Map.fetch(ts, name) do
       {:ok, %{offset: off, byte_size: sz}} ->
-        {:ok, binary_part(bin, base + off, sz)}
+        bytes =
+          cond do
+            gguf.mmap_handle != nil ->
+              NxArm.Native.mmap_slice_op(gguf.mmap_handle, base + off, sz)
+
+            gguf.file_contents != nil ->
+              binary_part(gguf.file_contents, base + off, sz)
+
+            true ->
+              <<>>
+          end
+
+        {:ok, bytes}
 
       :error ->
         {:error, :not_found}

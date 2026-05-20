@@ -345,6 +345,25 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Open a file as a memory-mapped resource. Returns `{handle,
+  file_size_bytes}`. The mmap lives as long as the handle reference;
+  pages are demand-loaded from disk. Use `mmap_slice_op/3` to read a
+  byte range out of it.
+  """
+  @spec mmap_open_op(String.t()) :: {reference(), non_neg_integer()}
+  def mmap_open_op(_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Read `len` bytes at `offset` from a mmap'd file. Returns a BEAM-
+  owned copy of the requested range -- the rest of the file stays on
+  disk until accessed.
+  """
+  @spec mmap_slice_op(reference(), non_neg_integer(), non_neg_integer()) :: binary()
+  def mmap_slice_op(_handle, _offset, _len),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Quantize an `(N, K)` f32 weight matrix to Q4_0 packed int4 +
   scales. K must be a multiple of 32. Returns `{packed_bin,
   scales_bin}`.

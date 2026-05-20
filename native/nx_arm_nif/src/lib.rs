@@ -8,7 +8,21 @@
 mod conv_int8;
 mod shape_ops;
 
-use rustler::{Env, NifResult, OwnedBinary};
+use rustler::{Env, NifResult, OwnedBinary, ResourceArc};
+
+// ---------------------------------------------------------------
+// E1: memory-mapped model file resource.
+//
+// Wraps a `memmap2::Mmap` in a rustler resource so a single mmap can
+// live for the lifetime of an Elixir reference. Slicing the mmap into
+// a binary still copies (see comment on mmap_slice_op) but the file
+// pages themselves are demand-loaded by the kernel — we never pull a
+// multi-GB file into BEAM heap up front.
+// ---------------------------------------------------------------
+pub struct MmapResource(memmap2::Mmap);
+
+unsafe impl Send for MmapResource {}
+unsafe impl Sync for MmapResource {}
 
 // ── helpers ─────────────────────────────────────────────
 
@@ -1112,4 +1126,40 @@ fn conv2d_f32_winograd_3x3_op<'a>(
     Ok(out_bin.release(env))
 }
 
-rustler::init!("Elixir.NxArm.Native");
+#[rustler::nif(schedule = "DirtyIo")]
+fn mmap_open_op(path: String) -> NifResult<(ResourceArc<MmapResource>, usize)> {
+    let file = std::fs::File::open(&path)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("open failed: {}", e))))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .map_err(|e| rustler::Error::Term(Box::new(format!("mmap failed: {}", e))))?;
+    let len = mmap.len();
+    Ok((ResourceArc::new(MmapResource(mmap)), len))
+}
+
+/// Read `len` bytes at `offset` from a mmap'd file into a fresh
+/// binary. The mmap'd pages are demand-loaded from disk; the
+/// returned binary is a BEAM-owned copy of just the requested range,
+/// so even multi-GB files only ever touch RAM lazily and in slices.
+#[rustler::nif(schedule = "DirtyIo")]
+fn mmap_slice_op<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<MmapResource>,
+    offset: usize,
+    len: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let bytes = &handle.0;
+    if offset.checked_add(len).map_or(true, |end| end > bytes.len()) {
+        return Err(rustler::Error::Term(Box::new(format!(
+            "mmap_slice: offset {} + len {} > file len {}",
+            offset, len, bytes.len()
+        ))));
+    }
+    bytes_to_bin(env, &bytes[offset..offset + len])
+}
+
+fn load(env: Env, _info: rustler::Term) -> bool {
+    rustler::resource!(MmapResource, env);
+    true
+}
+
+rustler::init!("Elixir.NxArm.Native", load = load);

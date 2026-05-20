@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 [dependencies]
 rustler = "0.36"
 rayon = "1.10"
+memmap2 = "0.9"

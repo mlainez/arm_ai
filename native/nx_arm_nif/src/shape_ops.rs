@@ -954,6 +954,101 @@ unsafe fn dot4_neon(a: *const f32, b: *const f32, k: usize) -> f32 {
 /// Bumblebee MLP / projection pattern — saves ~60–170 ms per call
 /// vs going through `Nx.broadcast` (whose wrapper has substantial
 /// per-call overhead for hot-loop callers).
+/// Fused bias-add + activation: `out[i] = activation(act[i] + bias[i mod inner])`.
+/// Saves the intermediate write+read between bias-add and the
+/// activation. Used in CNN blocks (Conv + bias + ReLU) and Linear +
+/// bias + GELU in MLPs.
+///
+/// `activation` is one of: `"none"`, `"relu"`, `"relu6"`, `"gelu"`,
+/// `"sigmoid"`, `"tanh"`.
+pub fn bias_add_activation_f32_into(
+    act: &[f32],
+    bias: &[f32],
+    out: &mut [f32],
+    outer: usize,
+    inner: usize,
+    activation: &str,
+) -> Result<(), String> {
+    if act.len() != outer * inner || out.len() != outer * inner {
+        return Err(format!(
+            "bias_add_act: act/out len {} != outer*inner = {}",
+            act.len(),
+            outer * inner
+        ));
+    }
+    if bias.len() != inner {
+        return Err(format!(
+            "bias_add_act: bias len {} != inner {}",
+            bias.len(),
+            inner
+        ));
+    }
+
+    let chunk_rows = ((outer + 7) / 8).max(8).min(outer.max(1));
+
+    use rayon::prelude::*;
+
+    out.par_chunks_mut(chunk_rows * inner)
+        .enumerate()
+        .for_each(|(ci, slot)| {
+            let row_base = ci * chunk_rows;
+            let rows_here = slot.len() / inner;
+
+            for r in 0..rows_here {
+                let row_idx = row_base + r;
+                let act_row = &act[row_idx * inner..row_idx * inner + inner];
+                let out_row = &mut slot[r * inner..r * inner + inner];
+
+                match activation {
+                    "none" => {
+                        for j in 0..inner {
+                            out_row[j] = act_row[j] + bias[j];
+                        }
+                    }
+                    "relu" => {
+                        for j in 0..inner {
+                            let v = act_row[j] + bias[j];
+                            out_row[j] = if v > 0.0 { v } else { 0.0 };
+                        }
+                    }
+                    "relu6" => {
+                        for j in 0..inner {
+                            let v = act_row[j] + bias[j];
+                            out_row[j] = v.max(0.0).min(6.0);
+                        }
+                    }
+                    "sigmoid" => {
+                        for j in 0..inner {
+                            let v = act_row[j] + bias[j];
+                            out_row[j] = 1.0 / (1.0 + (-v).exp());
+                        }
+                    }
+                    "tanh" => {
+                        for j in 0..inner {
+                            let v = act_row[j] + bias[j];
+                            out_row[j] = v.tanh();
+                        }
+                    }
+                    "gelu" => {
+                        let inv_sqrt2 = 1.0_f32 / std::f32::consts::SQRT_2;
+                        for j in 0..inner {
+                            let v = act_row[j] + bias[j];
+                            // Same Abramowitz erf as our standalone gelu.
+                            out_row[j] = 0.5 * v * (1.0 + erf_f32(v * inv_sqrt2));
+                        }
+                    }
+                    other => {
+                        // We've already validated upstream; this branch is
+                        // unreachable when callers use the documented set.
+                        panic!("unknown activation: {}", other);
+                    }
+                }
+            }
+        });
+
+    Ok(())
+}
+
 pub fn bias_add_f32_into(
     act: &[f32],
     bias: &[f32],

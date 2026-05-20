@@ -140,6 +140,15 @@ defmodule NxArm.Native do
   def elementwise_unary_f32_op(_op, _a), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Fused bias-add + activation in one pass.
+  `activation` is one of `"none" | "relu" | "relu6" | "gelu" | "sigmoid" | "tanh"`.
+  Saves the intermediate write+read between bias-add and activation.
+  """
+  @spec bias_add_activation_f32_op(binary(), binary(), String.t(), non_neg_integer(), non_neg_integer()) :: binary()
+  def bias_add_activation_f32_op(_act, _bias, _activation, _outer, _inner),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Fused bias add: `out[i] = act[i] + bias[i mod inner]`. Bypasses
   `Nx.broadcast`'s wrapper overhead (~60–170 ms/call in our profile)
   by doing the implicit broadcast inside the NIF.

@@ -125,12 +125,49 @@ defmodule NxArm.Compiler do
   # ── Pattern matchers ─────────────────────────────────────
 
   defp try_patterns(tensor) do
-    try_softmax_divide(tensor) ||
+    try_dead_broadcast(tensor) ||
+      try_dropout_elim(tensor) ||
+      try_softmax_divide(tensor) ||
       try_softmax_multiply(tensor) ||
       try_gelu(tensor) ||
       try_layernorm(tensor) ||
       tensor
   end
+
+  # B4: Dead broadcast elimination. `Nx.broadcast(x, shape)` where
+  # the input already matches `shape` is an identity — but Nx itself
+  # has substantial wrapper overhead per call (axes computation,
+  # `apply_vectorized`, etc.). Replacing the Expr node with its input
+  # tensor skips that overhead entirely.
+  defp try_dead_broadcast(%Nx.Tensor{
+         data: %Expr{op: :broadcast, args: [inner, target_shape, _axes]}
+       }) do
+    if Nx.shape(inner) == target_shape do
+      if System.get_env("NXARM_TRACE_FUSION") == "1" do
+        IO.puts("[NxArm fusion] dead broadcast eliminated (shape=#{inspect(target_shape)})")
+      end
+
+      inner
+    else
+      nil
+    end
+  end
+
+  defp try_dead_broadcast(_), do: nil
+
+  # B3: Dropout elimination. In inference mode, dropout is identity.
+  # Axon's `:dropout` op (when seen at our level) is wrapped in a
+  # `:metadata` Expr node by Nx.Defn; for safety we recognise the
+  # explicit form too.
+  defp try_dropout_elim(%Nx.Tensor{data: %Expr{op: :metadata, args: [inner, %{dropout: true}]}}) do
+    if System.get_env("NXARM_TRACE_FUSION") == "1" do
+      IO.puts("[NxArm fusion] dropout eliminated")
+    end
+
+    inner
+  end
+
+  defp try_dropout_elim(_), do: nil
 
   # softmax composed as `e / s` (my manual form, sanity check).
   #

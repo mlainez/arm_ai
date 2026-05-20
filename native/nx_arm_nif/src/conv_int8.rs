@@ -739,6 +739,102 @@ unsafe fn ci_dot_f32_neon(weights: &[f32], input: &[f32]) -> f32 {
     acc
 }
 
+/// Fused depthwise + 1×1 pointwise conv (the MobileNet / EfficientNet
+/// building block). Avoids materialising the intermediate
+/// `(N, H_out, W_out, Cin)` activation tensor: for each output
+/// position we compute the depthwise vector into a `Cin`-sized scratch
+/// buffer, optionally apply an activation, then do the pointwise GEMV
+/// against the (Cout, Cin) pointwise weight in one shot — keeping the
+/// depthwise output values in L1 across both consumers.
+///
+/// `activation`: 0 = none, 1 = ReLU, 2 = ReLU6 (the MobileNet default).
+///
+/// Layouts: input NHWC, depthwise weight `(Cin, Kh, Kw)`, pointwise
+/// weight `(Cout, Cin)`, both biases optional.
+pub fn depthwise_pointwise_f32(
+    input: &[f32],
+    dw_weight: &[f32],
+    dw_bias: Option<&[f32]>,
+    pw_weight: &[f32],
+    pw_bias: Option<&[f32]>,
+    output: &mut [f32],
+    n: usize,
+    h_in: usize,
+    w_in: usize,
+    c_in: usize,
+    c_out: usize,
+    kh: usize,
+    kw: usize,
+    stride_h: usize,
+    stride_w: usize,
+    pad_top: usize,
+    pad_bottom: usize,
+    pad_left: usize,
+    pad_right: usize,
+    activation: u8,
+) {
+    let (h_out, w_out) = output_dims(
+        h_in, w_in, kh, kw, stride_h, stride_w,
+        pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    let mut dw_scratch = vec![0.0f32; c_in];
+
+    for nn in 0..n {
+        for oh in 0..h_out {
+            for ow in 0..w_out {
+                // 1. Compute depthwise vector (Cin floats) at (oh, ow).
+                for ci in 0..c_in {
+                    let mut acc = 0.0f32;
+                    for ky in 0..kh {
+                        let ih = oh as isize * stride_h as isize + ky as isize
+                            - pad_top as isize;
+                        if ih < 0 || (ih as usize) >= h_in {
+                            continue;
+                        }
+                        let ih_u = ih as usize;
+                        for kx in 0..kw {
+                            let iw = ow as isize * stride_w as isize + kx as isize
+                                - pad_left as isize;
+                            if iw < 0 || (iw as usize) >= w_in {
+                                continue;
+                            }
+                            let iw_u = iw as usize;
+                            let inp = input[((nn * h_in + ih_u) * w_in + iw_u) * c_in + ci];
+                            let wt = dw_weight[(ci * kh + ky) * kw + kx];
+                            acc += inp * wt;
+                        }
+                    }
+                    if let Some(b) = dw_bias {
+                        acc += b[ci];
+                    }
+                    // Activation between depthwise and pointwise.
+                    acc = match activation {
+                        1 => acc.max(0.0),
+                        2 => acc.max(0.0).min(6.0),
+                        _ => acc,
+                    };
+                    dw_scratch[ci] = acc;
+                }
+
+                // 2. Pointwise GEMV: out[oh, ow, :] = pw_weight @ dw_scratch.
+                let out_base = ((nn * h_out + oh) * w_out + ow) * c_out;
+                for oc in 0..c_out {
+                    let mut acc = 0.0f32;
+                    let w_base = oc * c_in;
+                    for ci in 0..c_in {
+                        acc += pw_weight[w_base + ci] * dw_scratch[ci];
+                    }
+                    if let Some(b) = pw_bias {
+                        acc += b[oc];
+                    }
+                    output[out_base + oc] = acc;
+                }
+            }
+        }
+    }
+}
+
 /// im2col + GEMM convolution. For general `Kh`, `Kw`, stride, dilation
 /// (=1) and padding this packs each output position's receptive field
 /// into one row of an `M × K` activation matrix

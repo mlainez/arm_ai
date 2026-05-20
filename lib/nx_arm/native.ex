@@ -238,6 +238,37 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Fused depthwise + pointwise (1x1) conv -- the MobileNet /
+  EfficientNet block. Activation between the two convs: 0 = none,
+  1 = ReLU, 2 = ReLU6. Avoids materialising the intermediate Cin
+  tensor by computing the depthwise scratch vector inline per output
+  position.
+  """
+  @spec depthwise_pointwise_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          binary(),
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [non_neg_integer()],
+          non_neg_integer()
+        ) :: binary()
+  def depthwise_pointwise_f32_op(
+        _input,
+        _dw_weight,
+        _dw_bias,
+        _pw_weight,
+        _pw_bias,
+        _dims,
+        _stride,
+        _padding,
+        _activation
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Depthwise 2-D conv (feature_group_size == Cin). Kernel laid out as
   `{Cin, Kh, Kw}` raw f32 LE. NHWC input + NHWC output. Used by
   MobileNet/EfficientNet's per-channel spatial filter blocks.

@@ -215,6 +215,15 @@ defmodule NxArm.Native do
   def rope_f32_op(_input, _positions, _inv_freq, _n_rows, _head_dim, _heads_per_token),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "fp16 weight × f32 activation matmul. Weights converted via NEON vcvt_f32_f16 inline."
+  @spec dequant_matmul_f16_f32_op(binary(), binary(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  def dequant_matmul_f16_f32_op(_act, _weights_f16, _b, _m, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Convert an f32 byte buffer to f16 (IEEE 754 binary16)."
+  @spec f32_to_f16_op(binary()) :: binary()
+  def f32_to_f16_op(_input), do: :erlang.nif_error(:nif_not_loaded)
+
   @doc """
   Full int8 matmul: i8 activations × i8 weights × f32 per-row scales,
   returning f32. Uses SDOT (ARMv8.2-A `dotprod`) when runtime-detected,

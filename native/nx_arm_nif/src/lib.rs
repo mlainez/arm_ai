@@ -134,6 +134,47 @@ fn rope_f32_op<'a>(
     f32_vec_to_bin(env, &out)
 }
 
+/// fp16 weight × f32 activation matmul. Weights stored as 2 bytes
+/// each, converted to f32 inline via NEON vcvt_f32_f16. Halves weight
+/// memory footprint vs f32 with negligible accuracy loss.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn dequant_matmul_f16_f32_op<'a>(
+    env: Env<'a>,
+    act: rustler::Binary<'a>,
+    weights: rustler::Binary<'a>,
+    b: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let act_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(act.as_ptr() as *const f32, b * m * k)
+    };
+    let weights_slice: &[u16] = unsafe {
+        std::slice::from_raw_parts(weights.as_ptr() as *const u16, n * k)
+    };
+
+    let out = shape_ops::dequant_matmul_f16_f32(act_slice, weights_slice, b, m, n, k)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+/// Convert an f32 raw byte buffer to f16 (IEEE 754 binary16) bytes.
+/// Used to build half-precision weight stores from existing f32 params.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn f32_to_f16_op<'a>(env: Env<'a>, input: rustler::Binary<'a>) -> NifResult<rustler::Binary<'a>> {
+    let n = input.len() / 4;
+    let input_slice: &[f32] = unsafe { std::slice::from_raw_parts(input.as_ptr() as *const f32, n) };
+    let halves = shape_ops::f32_to_f16_array(input_slice);
+
+    let bytes = halves.len() * 2;
+    let mut bin = OwnedBinary::new(bytes)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let src: &[u8] = unsafe { std::slice::from_raw_parts(halves.as_ptr() as *const u8, bytes) };
+    bin.as_mut_slice().copy_from_slice(src);
+    Ok(bin.release(env))
+}
+
 /// Full int8 matmul: i8 acts × i8 weights with f32 scales out. Uses
 /// SDOT on ARMv8.2-A when available, vmlal_s8+vpadalq fallback otherwise.
 #[rustler::nif(schedule = "DirtyCpu")]

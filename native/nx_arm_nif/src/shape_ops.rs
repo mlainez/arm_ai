@@ -1445,6 +1445,191 @@ unsafe fn int8_dot(a: &[i8], w: &[i8], k: usize, _use_sdot: bool) -> i32 {
     total
 }
 
+/// fp16 weight × f32 activation matmul. Weights stored as IEEE 754
+/// half-precision (2 bytes each, half the memory of f32). Loaded as
+/// u16, converted to f32 at register fill via vcvt_f32_f16 (single
+/// NEON instruction), then standard f32 FMA accumulate.
+///
+/// Lossless on most trained weights (fp16's ±65k range covers
+/// transformer weights, and the 11-bit mantissa is plenty for
+/// values typically within a few units of zero). Halves the L1
+/// weight footprint vs f32 — the matmul becomes more
+/// arithmetic-bound instead of bandwidth-bound.
+///
+/// Layout: `weights` shape {N, K}, `act` shape {B, M, K} → out {B, M, N}.
+/// (Both contract on the last axis, same as Q@K^T.)
+#[cfg(target_arch = "aarch64")]
+pub fn dequant_matmul_f16_f32(
+    act: &[f32],
+    weights_u16: &[u16],
+    b: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<Vec<f32>, String> {
+    use core::arch::aarch64::*;
+
+    if act.len() != b * m * k {
+        return Err(format!(
+            "dequant_matmul_f16: act len {} != B*M*K = {}",
+            act.len(),
+            b * m * k
+        ));
+    }
+    if weights_u16.len() != n * k {
+        return Err(format!(
+            "dequant_matmul_f16: weights len {} != N*K = {}",
+            weights_u16.len(),
+            n * k
+        ));
+    }
+
+    let mut out = vec![0.0f32; b * m * n];
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(n).enumerate().for_each(|(bi_row, row)| {
+        let batch = bi_row / m;
+        let i = bi_row % m;
+        let a_base = batch * m * k + i * k;
+        let a = &act[a_base..a_base + k];
+
+        for j in 0..n {
+            let w_base = j * k;
+            let w_u16 = &weights_u16[w_base..w_base + k];
+
+            let mut acc = unsafe { vdupq_n_f32(0.0) };
+            let mut kk = 0;
+
+            // Process 4 f32 × 4 f16 at a time via vcvt_f32_f16.
+            while kk + 4 <= k {
+                unsafe {
+                    // Load 4 u16 as float16x4_t, convert to f32x4.
+                    let w_u16_vec = vld1_u16(w_u16.as_ptr().add(kk));
+                    let w_f16_vec = vreinterpret_f16_u16(w_u16_vec);
+                    let w_f32_vec = vcvt_f32_f16(w_f16_vec);
+
+                    let a_vec = vld1q_f32(a.as_ptr().add(kk));
+                    acc = vfmaq_f32(acc, a_vec, w_f32_vec);
+                }
+                kk += 4;
+            }
+
+            let mut total = unsafe { vaddvq_f32(acc) };
+            while kk < k {
+                let w_f32 = f16_to_f32(w_u16[kk]);
+                total += a[kk] * w_f32;
+                kk += 1;
+            }
+
+            row[j] = total;
+        }
+    });
+
+    Ok(out)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn dequant_matmul_f16_f32(
+    act: &[f32],
+    weights_u16: &[u16],
+    b: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<Vec<f32>, String> {
+    let mut out = vec![0.0f32; b * m * n];
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(n).enumerate().for_each(|(bi_row, row)| {
+        let batch = bi_row / m;
+        let i = bi_row % m;
+        let a_base = batch * m * k + i * k;
+        let a = &act[a_base..a_base + k];
+
+        for j in 0..n {
+            let w_base = j * k;
+            let mut total = 0.0f32;
+            for kk in 0..k {
+                total += a[kk] * f16_to_f32(weights_u16[w_base + kk]);
+            }
+            row[j] = total;
+        }
+    });
+
+    Ok(out)
+}
+
+/// Scalar f16→f32 conversion. IEEE 754 half precision: 1 sign + 5
+/// exponent + 10 mantissa. Used in the scalar tail of the NEON path
+/// and on non-aarch64 fallbacks.
+fn f16_to_f32(u: u16) -> f32 {
+    let sign = ((u >> 15) & 1) as u32;
+    let exp = ((u >> 10) & 0x1f) as u32;
+    let mant = (u & 0x3ff) as u32;
+
+    let f32_bits = if exp == 0 {
+        if mant == 0 {
+            sign << 31
+        } else {
+            // Subnormal: normalise.
+            let mut e = 1u32;
+            let mut m = mant;
+            while m & 0x400 == 0 {
+                m <<= 1;
+                e += 1;
+            }
+            let new_exp = 127 - 15 - e + 1;
+            (sign << 31) | (new_exp << 23) | ((m & 0x3ff) << 13)
+        }
+    } else if exp == 0x1f {
+        // Infinity / NaN.
+        (sign << 31) | (0xffu32 << 23) | (mant << 13)
+    } else {
+        let new_exp = exp + (127 - 15);
+        (sign << 31) | (new_exp << 23) | (mant << 13)
+    };
+
+    f32::from_bits(f32_bits)
+}
+
+/// Quantize an f32 array to fp16 by IEEE 754 round-to-nearest-even.
+pub fn f32_to_f16_array(f32s: &[f32]) -> Vec<u16> {
+    f32s.iter().map(|&v| f32_to_f16(v)).collect()
+}
+
+fn f32_to_f16(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp_f32 = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x7fffff;
+
+    if exp_f32 == 0xff {
+        // Inf / NaN.
+        sign | 0x7c00 | (if mant != 0 { 1 } else { 0 } as u16)
+    } else if exp_f32 == 0 {
+        // f32 zero / subnormal → f16 zero.
+        sign
+    } else {
+        let exp_f16 = exp_f32 - (127 - 15);
+        if exp_f16 >= 0x1f {
+            // Overflow to inf.
+            sign | 0x7c00
+        } else if exp_f16 <= 0 {
+            // Underflow: round to f16 subnormal or zero.
+            sign
+        } else {
+            let mant_f16 = (mant >> 13) as u16;
+            // Round-to-nearest-even on the discarded bits.
+            let round = if (mant & 0x1fff) > 0x1000 || ((mant & 0x1fff) == 0x1000 && (mant_f16 & 1) == 1) {
+                1
+            } else {
+                0
+            };
+            sign | ((exp_f16 as u16) << 10) | (mant_f16.wrapping_add(round))
+        }
+    }
+}
+
 /// Weight-only int8 matmul: `act` f32 × `weights` int8, per-row
 /// (per-output-channel) f32 scales. Computes
 ///

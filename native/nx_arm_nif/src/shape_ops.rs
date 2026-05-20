@@ -456,7 +456,7 @@ pub fn batched_matmul_f32(
 ///
 /// Use this for K > 256; below that the unblocked path is fine
 /// (fewer accumulator load/store cycles).
-fn matmul_2d_neon_blocked(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+pub(crate) fn matmul_2d_neon_blocked(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     const K_BLOCK: usize = 128;
 
     let n_tiles = n / 8;

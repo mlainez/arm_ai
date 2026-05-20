@@ -21,6 +21,8 @@
 //! validated against `Nx.conv` on host and on-device, swap the inner
 //! loop for `core::arch::aarch64` int8x8 widening + f32 FMA.
 
+use crate::shape_ops;
+
 /// Dot product of one row of weights (int8) against one row of
 /// activations (f32). Pulled out as a separate function so the NEON
 /// path can specialise it on aarch64 without uglifying the outer
@@ -735,6 +737,105 @@ unsafe fn ci_dot_f32_neon(weights: &[f32], input: &[f32]) -> f32 {
         i += 1;
     }
     acc
+}
+
+/// im2col + GEMM convolution. For general `Kh`, `Kw`, stride, dilation
+/// (=1) and padding this packs each output position's receptive field
+/// into one row of an `M × K` activation matrix
+/// (`M = N * H_out * W_out`, `K = Kh * Kw * Cin`), then performs a
+/// single matmul against a weight matrix shape `K × Cout` to produce
+/// the `M × Cout` output. Reuses the cache-blocked NEON kernel from
+/// `shape_ops`.
+///
+/// The temporary activation matrix uses `M * K * 4` bytes — for ViT
+/// patch16 stem on a 224 image this is ~1.5 MB, well within budget.
+/// For very large feature maps it should still fit in L2.
+pub fn conv2d_f32_im2col(
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    n: usize,
+    h_in: usize,
+    w_in: usize,
+    c_in: usize,
+    c_out: usize,
+    kh: usize,
+    kw: usize,
+    stride_h: usize,
+    stride_w: usize,
+    pad_top: usize,
+    pad_bottom: usize,
+    pad_left: usize,
+    pad_right: usize,
+) {
+    let (h_out, w_out) = output_dims(
+        h_in, w_in, kh, kw, stride_h, stride_w,
+        pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    let m = n * h_out * w_out;
+    let k_inner = kh * kw * c_in;
+
+    // Pack receptive fields into a row-major (M, K) matrix.
+    let mut a = vec![0.0f32; m * k_inner];
+    for nn in 0..n {
+        for oh in 0..h_out {
+            for ow in 0..w_out {
+                let row = (nn * h_out + oh) * w_out + ow;
+                let row_base = row * k_inner;
+                for ky in 0..kh {
+                    let ih = oh as isize * stride_h as isize + ky as isize
+                        - pad_top as isize;
+                    if ih < 0 || (ih as usize) >= h_in {
+                        continue;
+                    }
+                    let ih_u = ih as usize;
+                    for kx in 0..kw {
+                        let iw = ow as isize * stride_w as isize + kx as isize
+                            - pad_left as isize;
+                        if iw < 0 || (iw as usize) >= w_in {
+                            continue;
+                        }
+                        let iw_u = iw as usize;
+                        let col_base = (ky * kw + kx) * c_in;
+                        let inp_base = ((nn * h_in + ih_u) * w_in + iw_u) * c_in;
+                        a[row_base + col_base..row_base + col_base + c_in]
+                            .copy_from_slice(&input[inp_base..inp_base + c_in]);
+                    }
+                }
+            }
+        }
+    }
+
+    // Repack weight from (Cout, Kh, Kw, Cin) to (Kh*Kw*Cin, Cout) row-major.
+    let mut b = vec![0.0f32; k_inner * c_out];
+    for oc in 0..c_out {
+        for ky in 0..kh {
+            for kx in 0..kw {
+                for ic in 0..c_in {
+                    let src = ((oc * kh + ky) * kw + kx) * c_in + ic;
+                    let dst = ((ky * kw + kx) * c_in + ic) * c_out + oc;
+                    b[dst] = weight[src];
+                }
+            }
+        }
+    }
+
+    shape_ops::matmul_2d_neon_blocked(&a, &b, output, m, c_out, k_inner);
+
+    if let Some(bs) = bias {
+        for i in 0..m {
+            let base = i * c_out;
+            for oc in 0..c_out {
+                output[base + oc] += bs[oc];
+            }
+        }
+    }
+    // Use `out` to silence dead-write warning when bias is None — the
+    // matmul has already written it.
+    let _ = h_out;
+    let _ = w_out;
 }
 
 #[cfg(test)]

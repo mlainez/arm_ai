@@ -228,6 +228,16 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  General 2-D conv via im2col + GEMM. Same NHWC + flat-weight layout
+  as `conv2d_f32_op`. Recommended when `Cin * Kh * Kw` is large
+  (>~64): packs receptive fields into a contiguous matrix and reuses
+  the cache-blocked NEON matmul kernel.
+  """
+  @spec conv2d_f32_im2col_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) :: binary()
+  def conv2d_f32_im2col_op(_input, _weight, _bias, _dims, _stride, _padding),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Depthwise 2-D conv (feature_group_size == Cin). Kernel laid out as
   `{Cin, Kh, Kw}` raw f32 LE. NHWC input + NHWC output. Used by
   MobileNet/EfficientNet's per-channel spatial filter blocks.

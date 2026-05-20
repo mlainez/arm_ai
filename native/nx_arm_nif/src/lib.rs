@@ -819,6 +819,60 @@ fn conv2d_f32_op<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
+fn conv2d_f32_im2col_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    weight: rustler::Binary<'a>,
+    bias: rustler::Binary<'a>,
+    dims: Vec<usize>,
+    stride: Vec<usize>,
+    padding: Vec<usize>,
+) -> NifResult<rustler::Binary<'a>> {
+    if dims.len() != 7 || stride.len() != 2 || padding.len() != 4 {
+        return Err(rustler::Error::Term(Box::new(
+            "bad dims/stride/padding".to_string(),
+        )));
+    }
+
+    let (n, h_in, w_in, c_in, c_out, kh, kw) =
+        (dims[0], dims[1], dims[2], dims[3], dims[4], dims[5], dims[6]);
+    let (stride_h, stride_w) = (stride[0], stride[1]);
+    let (pad_top, pad_bottom, pad_left, pad_right) =
+        (padding[0], padding[1], padding[2], padding[3]);
+
+    let (h_out, w_out) = conv_int8::output_dims(
+        h_in, w_in, kh, kw, stride_h, stride_w, pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    let input_f32: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, n * h_in * w_in * c_in)
+    };
+    let weight_f32: &[f32] = unsafe {
+        std::slice::from_raw_parts(weight.as_ptr() as *const f32, c_out * kh * kw * c_in)
+    };
+    let bias_slice: Option<&[f32]> = if bias.is_empty() {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(bias.as_ptr() as *const f32, c_out) })
+    };
+
+    let out_n = n * h_out * w_out * c_out;
+    let mut out_bin = OwnedBinary::new(out_n * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let out_f32: &mut [f32] = unsafe {
+        std::slice::from_raw_parts_mut(out_bin.as_mut_slice().as_mut_ptr() as *mut f32, out_n)
+    };
+
+    conv_int8::conv2d_f32_im2col(
+        input_f32, weight_f32, bias_slice, out_f32,
+        n, h_in, w_in, c_in, c_out, kh, kw,
+        stride_h, stride_w, pad_top, pad_bottom, pad_left, pad_right,
+    );
+
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 fn conv2d_f32_winograd_3x3_op<'a>(
     env: Env<'a>,
     input: rustler::Binary<'a>,

@@ -216,6 +216,15 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Full int8 matmul: i8 activations × i8 weights × f32 per-row scales,
+  returning f32. Uses SDOT (ARMv8.2-A `dotprod`) when runtime-detected,
+  vmlal_s8 + vpadalq_s16 fallback otherwise.
+  """
+  @spec int8_matmul_f32_op(binary(), binary(), binary(), float(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  def int8_matmul_f32_op(_a, _w, _w_scales, _act_scale, _m, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Weight-only int8 matmul: f32 activations × int8 weights × f32 per-row
   scales. Returns f32 output. Layout matches batched_matmul_f32 with
   `right_transposed = true` (acts {B,M,K} × weights {N,K} → out {B,M,N}).

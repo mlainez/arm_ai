@@ -1334,6 +1334,117 @@ pub fn bilinear_resize_u8(
     Ok(out)
 }
 
+/// Full-int8 matmul. Activations and weights both int8; output f32.
+/// Computes `out[i, j] = act_scale * w_scale[j] * sum_k a[i,k] * w[j,k]`.
+///
+/// Two NEON code paths:
+///   * **SDOT** path (ARMv8.2-A `dotprod`): 4 i8 dot products per
+///     instruction → 4× of the vmlal path. Activated at runtime via
+///     `is_aarch64_feature_detected!("dotprod")` — works on Pi 5,
+///     recent Snapdragons, Apple Silicon. Not on Cortex-A73 (FP3+).
+///   * **vmlal_s8 + vpadalq_s16** fallback (ARMv8.0): widening
+///     multiplies of 8 i8 pairs to 8 i16s, then pairwise-add into
+///     i32 accumulators. Slower than SDOT but still ~2× over scalar.
+pub fn int8_matmul_f32(
+    a: &[i8],
+    w: &[i8],
+    act_scale: f32,
+    w_scales: &[f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<Vec<f32>, String> {
+    if a.len() != m * k {
+        return Err(format!("int8_matmul: a len {} != M*K = {}", a.len(), m * k));
+    }
+    if w.len() != n * k {
+        return Err(format!("int8_matmul: w len {} != N*K = {}", w.len(), n * k));
+    }
+    if w_scales.len() != n {
+        return Err(format!(
+            "int8_matmul: w_scales len {} != N = {}",
+            w_scales.len(),
+            n
+        ));
+    }
+
+    let mut out = vec![0.0f32; m * n];
+
+    #[cfg(target_arch = "aarch64")]
+    let use_sdot = std::arch::is_aarch64_feature_detected!("dotprod");
+    #[cfg(not(target_arch = "aarch64"))]
+    let use_sdot = false;
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+        let a_row_off = i * k;
+
+        for j in 0..n {
+            let w_row_off = j * k;
+            let acc_i32 = unsafe { int8_dot(&a[a_row_off..], &w[w_row_off..], k, use_sdot) };
+            row[j] = (acc_i32 as f32) * act_scale * w_scales[j];
+        }
+    });
+
+    Ok(out)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn int8_dot(a: &[i8], w: &[i8], k: usize, use_sdot: bool) -> i32 {
+    use core::arch::aarch64::*;
+
+    let mut acc = vdupq_n_s32(0);
+    let mut kk = 0;
+
+    if use_sdot {
+        // SDOT path: 16 i8s per iteration, 4 i32 partial sums.
+        while kk + 16 <= k {
+            let av = vld1q_s8(a.as_ptr().add(kk));
+            let wv = vld1q_s8(w.as_ptr().add(kk));
+            // sdot inline asm — NEON intrinsic name is vdotq_s32 but
+            // its availability in stable Rust core::arch is gated. We
+            // emit the instruction directly.
+            core::arch::asm!(
+                "sdot {acc:v}.4s, {a:v}.16b, {w:v}.16b",
+                acc = inout(vreg) acc,
+                a = in(vreg) av,
+                w = in(vreg) wv,
+                options(pure, nomem, nostack, preserves_flags),
+            );
+            kk += 16;
+        }
+    } else {
+        // vmlal_s8 fallback: 8 i8s per iteration, widen→i16 pairs,
+        // then pairwise-add into i32 acc.
+        while kk + 8 <= k {
+            let av = vld1_s8(a.as_ptr().add(kk));
+            let wv = vld1_s8(w.as_ptr().add(kk));
+            let prod = vmull_s8(av, wv);
+            acc = vpadalq_s16(acc, prod);
+            kk += 8;
+        }
+    }
+
+    let mut total = vaddvq_s32(acc);
+
+    // Scalar tail for k % 16 (or 8).
+    while kk < k {
+        total += (a[kk] as i32) * (w[kk] as i32);
+        kk += 1;
+    }
+
+    total
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+unsafe fn int8_dot(a: &[i8], w: &[i8], k: usize, _use_sdot: bool) -> i32 {
+    let mut total = 0i32;
+    for kk in 0..k {
+        total += (a[kk] as i32) * (w[kk] as i32);
+    }
+    total
+}
+
 /// Weight-only int8 matmul: `act` f32 × `weights` int8, per-row
 /// (per-output-channel) f32 scales. Computes
 ///

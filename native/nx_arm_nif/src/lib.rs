@@ -134,6 +134,30 @@ fn rope_f32_op<'a>(
     f32_vec_to_bin(env, &out)
 }
 
+/// Full int8 matmul: i8 acts × i8 weights with f32 scales out. Uses
+/// SDOT on ARMv8.2-A when available, vmlal_s8+vpadalq fallback otherwise.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn int8_matmul_f32_op<'a>(
+    env: Env<'a>,
+    a: rustler::Binary<'a>,
+    w: rustler::Binary<'a>,
+    w_scales: rustler::Binary<'a>,
+    act_scale: f64,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let a_slice: &[i8] = unsafe { std::slice::from_raw_parts(a.as_ptr() as *const i8, m * k) };
+    let w_slice: &[i8] = unsafe { std::slice::from_raw_parts(w.as_ptr() as *const i8, n * k) };
+    let w_scales_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(w_scales.as_ptr() as *const f32, n)
+    };
+
+    let out = shape_ops::int8_matmul_f32(a_slice, w_slice, act_scale as f32, w_scales_slice, m, n, k)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
 /// Weight-only int8 matmul: f32 acts × int8 weights × f32 per-row
 /// scales. Layout matches batched_matmul_f32 with `right_transposed=true`
 /// (acts and weights both contract on last axis).

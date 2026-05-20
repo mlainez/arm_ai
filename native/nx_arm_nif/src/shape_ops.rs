@@ -348,27 +348,36 @@ pub fn batched_matmul_f32(
 /// aren't multiples of 4 are handled by scalar fallback for those
 /// remaining cells only.
 fn matmul_2d_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    let n_tiles = n / 4;
-    let n_tail_start = n_tiles * 4;
+    // 4-row × 8-col register tile. C has 8 NEON accumulators (2 per row,
+    // 4 floats each = 32 output cells per thread per K-loop). Cortex-A73
+    // has 32 vector regs, plenty of room.
+    let n_tiles_8 = n / 8;
+    let n_after_8 = n_tiles_8 * 8;
+    // Anything left after the 8-col tiles, handle in 4-col tiles.
+    let n_tiles_4 = (n - n_after_8) / 4;
+    let n_after_4 = n_after_8 + n_tiles_4 * 4;
     let m_tiles_count = m / 4;
     let m_tail_start = m_tiles_count * 4;
 
     // Transport the mut pointer across threads as a usize — guarantees
-    // Send + Sync without unsafe-impl shenanigans. Disjointness across
-    // the (mi, nj) tile space ensures no two threads ever target the
-    // same output cell, so race-free in practice.
+    // Send + Sync. Tile disjointness ensures no two threads ever
+    // target the same output cell.
     let c_addr = c.as_mut_ptr() as usize;
 
     (0..m_tiles_count).into_par_iter().for_each(|mi| {
         let row_base = mi * 4;
         let c_ptr = c_addr as *mut f32;
         unsafe {
-            for nj in 0..n_tiles {
-                let col_base = nj * 4;
+            for nj in 0..n_tiles_8 {
+                let col_base = nj * 8;
+                matmul_kernel_4x8(a, b, c_ptr, row_base, col_base, n, k);
+            }
+            for nj in 0..n_tiles_4 {
+                let col_base = n_after_8 + nj * 4;
                 matmul_kernel_4x4(a, b, c_ptr, row_base, col_base, n, k);
             }
             // N tail (n % 4 columns) for these 4 rows.
-            for col in n_tail_start..n {
+            for col in n_after_4..n {
                 for row_off in 0..4 {
                     let row = row_base + row_off;
                     let a_row = std::slice::from_raw_parts(a.as_ptr().add(row * k), k);
@@ -440,6 +449,80 @@ unsafe fn matmul_kernel_4x4(
     vst1q_f32(c_ptr.add((row_base + 1) * n + col_base), c1);
     vst1q_f32(c_ptr.add((row_base + 2) * n + col_base), c2);
     vst1q_f32(c_ptr.add((row_base + 3) * n + col_base), c3);
+}
+
+/// 4-row × 8-col register kernel — twice the throughput of the 4×4
+/// variant for shapes where N is a multiple of 8. 8 vector C
+/// accumulators (4 rows × 2 col-vecs), 2 B vectors, 4 A scalars. On
+/// Cortex-A73 (32 NEON regs) plenty of margin.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn matmul_kernel_4x8(
+    a: &[f32],
+    b: &[f32],
+    c_ptr: *mut f32,
+    row_base: usize,
+    col_base: usize,
+    n: usize,
+    k: usize,
+) {
+    use core::arch::aarch64::*;
+
+    let mut c00 = vdupq_n_f32(0.0);
+    let mut c01 = vdupq_n_f32(0.0);
+    let mut c10 = vdupq_n_f32(0.0);
+    let mut c11 = vdupq_n_f32(0.0);
+    let mut c20 = vdupq_n_f32(0.0);
+    let mut c21 = vdupq_n_f32(0.0);
+    let mut c30 = vdupq_n_f32(0.0);
+    let mut c31 = vdupq_n_f32(0.0);
+
+    let a_row0 = a.as_ptr().add(row_base * k);
+    let a_row1 = a.as_ptr().add((row_base + 1) * k);
+    let a_row2 = a.as_ptr().add((row_base + 2) * k);
+    let a_row3 = a.as_ptr().add((row_base + 3) * k);
+    let b_ptr = b.as_ptr();
+
+    for kk in 0..k {
+        let b0 = vld1q_f32(b_ptr.add(kk * n + col_base));
+        let b1 = vld1q_f32(b_ptr.add(kk * n + col_base + 4));
+        let a0 = *a_row0.add(kk);
+        let a1 = *a_row1.add(kk);
+        let a2 = *a_row2.add(kk);
+        let a3 = *a_row3.add(kk);
+        c00 = vfmaq_n_f32(c00, b0, a0);
+        c01 = vfmaq_n_f32(c01, b1, a0);
+        c10 = vfmaq_n_f32(c10, b0, a1);
+        c11 = vfmaq_n_f32(c11, b1, a1);
+        c20 = vfmaq_n_f32(c20, b0, a2);
+        c21 = vfmaq_n_f32(c21, b1, a2);
+        c30 = vfmaq_n_f32(c30, b0, a3);
+        c31 = vfmaq_n_f32(c31, b1, a3);
+    }
+
+    vst1q_f32(c_ptr.add(row_base * n + col_base), c00);
+    vst1q_f32(c_ptr.add(row_base * n + col_base + 4), c01);
+    vst1q_f32(c_ptr.add((row_base + 1) * n + col_base), c10);
+    vst1q_f32(c_ptr.add((row_base + 1) * n + col_base + 4), c11);
+    vst1q_f32(c_ptr.add((row_base + 2) * n + col_base), c20);
+    vst1q_f32(c_ptr.add((row_base + 2) * n + col_base + 4), c21);
+    vst1q_f32(c_ptr.add((row_base + 3) * n + col_base), c30);
+    vst1q_f32(c_ptr.add((row_base + 3) * n + col_base + 4), c31);
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+unsafe fn matmul_kernel_4x8(
+    a: &[f32],
+    b: &[f32],
+    c_ptr: *mut f32,
+    row_base: usize,
+    col_base: usize,
+    n: usize,
+    k: usize,
+) {
+    matmul_kernel_4x4(a, b, c_ptr, row_base, col_base, n, k);
+    matmul_kernel_4x4(a, b, c_ptr, row_base, col_base + 4, n, k);
 }
 
 /// Scalar fallback for non-aarch64 hosts (e.g. CI on x86_64).

@@ -28,6 +28,16 @@ fn bytes_to_bin<'a>(env: Env<'a>, v: &[u8]) -> NifResult<rustler::Binary<'a>> {
     Ok(bin.release(env))
 }
 
+/// Allocate a fresh `OwnedBinary` of `n_elements * 4` bytes and view it
+/// as a `&mut [f32]`. Used by NIFs that can write directly into the
+/// output buffer, skipping the Vec<f32> intermediate + memcpy pair.
+fn alloc_f32_bin(n_elements: usize) -> NifResult<(OwnedBinary, *mut f32)> {
+    let bin = OwnedBinary::new(n_elements * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let ptr = bin.as_slice().as_ptr() as *mut f32;
+    Ok((bin, ptr))
+}
+
 // ── shape ops (dtype-agnostic via element_size) ─────────
 
 #[rustler::nif(schedule = "DirtyCpu")]

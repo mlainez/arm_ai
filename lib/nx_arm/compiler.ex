@@ -127,6 +127,8 @@ defmodule NxArm.Compiler do
   defp try_patterns(tensor) do
     try_softmax_divide(tensor) ||
       try_softmax_multiply(tensor) ||
+      try_gelu(tensor) ||
+      try_layernorm(tensor) ||
       tensor
   end
 
@@ -232,6 +234,187 @@ defmodule NxArm.Compiler do
       id: make_ref(),
       op: :nxarm_softmax,
       args: [x, axis],
+      context: out_tensor.data.context
+    }
+
+    %{out_tensor | data: new_data}
+  end
+
+  # ── GELU pattern: divide(multiply(add(erf(divide(x, √2)), 1), x), 2) ──
+  # Nx commutes constants to the front in add/multiply, so we have to
+  # accept either operand order on the add and multiply.
+  defp try_gelu(%Nx.Tensor{data: %Expr{op: :divide, args: [num, denom]}} = tensor) do
+    with true <- constant_close?(denom, 2.0),
+         %Nx.Tensor{data: %Expr{op: :multiply, args: [a, b]}} <- num,
+         {erf_add_t, x_t} <- pick_erf_add_and_x(a, b),
+         {:ok, erf_t} <- pick_erf_from_add(erf_add_t),
+         %Nx.Tensor{data: %Expr{op: :erf, args: [div_t]}} <- erf_t,
+         %Nx.Tensor{data: %Expr{op: :divide, args: [x_in, sqrt2_t]}} <- div_t,
+         true <- constant_close?(sqrt2_t, :math.sqrt(2.0)),
+         true <- same_id?(x_in, x_t) do
+      build_gelu(tensor, x_t)
+    else
+      _ -> nil
+    end
+  end
+
+  # `add(erf, 1)` and `add(1, erf)` both legal — Nx commutes constants.
+  defp pick_erf_from_add(%Nx.Tensor{data: %Expr{op: :add, args: [a, b]}}) do
+    cond do
+      match?(%Nx.Tensor{data: %Expr{op: :erf}}, a) and constant_close?(b, 1.0) -> {:ok, a}
+      match?(%Nx.Tensor{data: %Expr{op: :erf}}, b) and constant_close?(a, 1.0) -> {:ok, b}
+      true -> :error
+    end
+  end
+
+  defp pick_erf_from_add(_), do: :error
+
+  defp try_gelu(_), do: nil
+
+  # In `multiply(a, b)` where one is (add(erf(...), 1)) and the other
+  # is `x`, return them in canonical order. Nx may commute factors.
+  defp pick_erf_add_and_x(a, b) do
+    cond do
+      match?(%Nx.Tensor{data: %Expr{op: :add}}, a) -> {a, b}
+      match?(%Nx.Tensor{data: %Expr{op: :add}}, b) -> {b, a}
+      true -> {nil, nil}
+    end
+  end
+
+  defp constant_close?(%Nx.Tensor{data: %Expr{op: :constant, args: [n]}}, target) when is_number(n) do
+    abs(n - target) < 1.0e-4
+  end
+
+  defp constant_close?(_, _), do: false
+
+  defp same_id?(%Nx.Tensor{data: %Expr{id: a}}, %Nx.Tensor{data: %Expr{id: b}}), do: a == b
+  defp same_id?(_, _), do: false
+
+  defp build_gelu(out_tensor, x) do
+    if System.get_env("NXARM_TRACE_FUSION") == "1" do
+      IO.puts("[NxArm fusion] gelu shape=#{inspect(Nx.shape(out_tensor))}")
+    end
+
+    new_data = %Expr{
+      id: make_ref(),
+      op: :nxarm_gelu,
+      args: [x],
+      context: out_tensor.data.context
+    }
+
+    %{out_tensor | data: new_data}
+  end
+
+  # ── LayerNorm pattern (Axon's `scale * (input - mean) + bias`) ──
+  #
+  # Tree (input/output shape `{..., hidden}`):
+  #   add(
+  #     multiply(
+  #       multiply(gamma_param_or_reshape,
+  #                rsqrt(add(variance_t, eps_const))),
+  #       subtract(x_t, mean_t)
+  #     ),
+  #     beta_param_or_reshape
+  #   )
+  #
+  # `variance_t` is itself a chain `mean((x - mean(x))^2)` — we don't
+  # match it exhaustively; instead we require that the subtract's left
+  # is `x_t` and the rsqrt input has the right shape (1 in the last
+  # axis). Good enough to catch Bumblebee/Axon's LayerNorm without
+  # false positives.
+  defp try_layernorm(%Nx.Tensor{data: %Expr{op: :add, args: [a, b]}} = tensor) do
+    # Top-level `add(inner_multiply, beta)` — but Nx commutes constants,
+    # and `beta` is a parameter so it may end up first too if the
+    # multiply contains a constant. Try both orders.
+    try_layernorm_ordered(tensor, a, b) || try_layernorm_ordered(tensor, b, a)
+  end
+
+  defp try_layernorm(_), do: nil
+
+  defp try_layernorm_ordered(tensor, inner, beta_t) do
+    with %Nx.Tensor{data: %Expr{op: :multiply, args: [m1, m2]}} <- inner,
+         {scale_t, normed_t} <- pick_scale_and_normed(m1, m2),
+         %Nx.Tensor{data: %Expr{op: :multiply, args: [s1, s2]}} <- scale_t,
+         {gamma_t, rsqrt_t} <- pick_gamma_and_rsqrt(s1, s2),
+         %Nx.Tensor{data: %Expr{op: :rsqrt, args: [var_plus_eps_t]}} <- rsqrt_t,
+         %Nx.Tensor{data: %Expr{op: :add, args: [aa, bb]}} <- var_plus_eps_t,
+         {:ok, eps} <- pick_eps_constant(aa, bb),
+         %Nx.Tensor{data: %Expr{op: :subtract, args: [x_t, _mean_t]}} <- normed_t,
+         {:ok, gamma_1d} <- unwrap_to_param_or_constant(gamma_t),
+         {:ok, beta_1d} <- unwrap_to_param_or_constant(beta_t) do
+      build_layernorm(tensor, x_t, gamma_1d, beta_1d, eps)
+    else
+      _ -> nil
+    end
+  end
+
+  # In `multiply(scale, normed)` find which one is the scale
+  # (`multiply(gamma, rsqrt)`) and which is the normed (`subtract`).
+  defp pick_scale_and_normed(a, b) do
+    cond do
+      match?(%Nx.Tensor{data: %Expr{op: :subtract}}, a) and
+        match?(%Nx.Tensor{data: %Expr{op: :multiply}}, b) ->
+        {b, a}
+
+      match?(%Nx.Tensor{data: %Expr{op: :subtract}}, b) and
+        match?(%Nx.Tensor{data: %Expr{op: :multiply}}, a) ->
+        {a, b}
+
+      true ->
+        nil
+    end
+  end
+
+  defp pick_gamma_and_rsqrt(a, b) do
+    cond do
+      match?(%Nx.Tensor{data: %Expr{op: :rsqrt}}, b) -> {a, b}
+      match?(%Nx.Tensor{data: %Expr{op: :rsqrt}}, a) -> {b, a}
+      true -> nil
+    end
+  end
+
+  defp pick_eps_constant(a, b) do
+    case extract_constant(a) do
+      {:ok, n} when n > 0.0 and n < 0.1 -> {:ok, n}
+      _ -> extract_constant(b) |> validate_small_positive()
+    end
+  end
+
+  defp validate_small_positive({:ok, n}) when n > 0.0 and n < 0.1, do: {:ok, n}
+  defp validate_small_positive(_), do: :error
+
+  defp try_layernorm(_), do: nil
+
+  defp extract_constant(%Nx.Tensor{data: %Expr{op: :constant, args: [n]}}) when is_number(n),
+    do: {:ok, n * 1.0}
+
+  defp extract_constant(_), do: :error
+
+  # gamma/beta in Axon are reshape(parameter, [..., 1, ..., hidden]).
+  # We accept anything that has a parameter at the root and the last
+  # axis matches the LayerNorm hidden dimension. For the fused NIF we
+  # need them as flat length-`inner` vectors, so we also pass the
+  # tensor as-is and the backend callback reshapes if needed.
+  defp unwrap_to_param_or_constant(%Nx.Tensor{data: %Expr{op: :reshape}} = t),
+    do: {:ok, t}
+
+  defp unwrap_to_param_or_constant(%Nx.Tensor{data: %Expr{op: :parameter}} = t),
+    do: {:ok, t}
+
+  defp unwrap_to_param_or_constant(%Nx.Tensor{data: %Expr{op: :broadcast, args: [inner | _]}}),
+    do: unwrap_to_param_or_constant(inner)
+
+  defp unwrap_to_param_or_constant(_), do: :error
+
+  defp build_layernorm(out_tensor, x, gamma, beta, eps) do
+    if System.get_env("NXARM_TRACE_FUSION") == "1" do
+      IO.puts("[NxArm fusion] layernorm shape=#{inspect(Nx.shape(out_tensor))} eps=#{eps}")
+    end
+
+    new_data = %Expr{
+      id: make_ref(),
+      op: :nxarm_layernorm,
+      args: [x, gamma, beta, eps],
       context: out_tensor.data.context
     }
 

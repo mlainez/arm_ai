@@ -878,6 +878,142 @@ fn softmax_row_f32(input: &[f32], out: &mut [f32]) {
     }
 }
 
+/// Fused GELU along all elements. Replaces Axon's defn
+/// `((erf(x / √2) + 1) * x) / 2` decomposition (5 backend calls,
+/// 5 Vec<f32> allocs) with one NIF call.
+pub fn gelu_f32(input: &[f32]) -> Result<Vec<f32>, String> {
+    let n = input.len();
+    let mut out = vec![0.0f32; n];
+    let inv_sqrt2 = 1.0_f32 / std::f32::consts::SQRT_2;
+
+    let chunk = ((n + 7) / 8).max(8192).min(n.max(1));
+
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(ci, slot)| {
+            let s = ci * chunk;
+            for j in 0..slot.len() {
+                let x = input[s + j];
+                slot[j] = 0.5 * x * (1.0 + erf_f32(x * inv_sqrt2));
+            }
+        });
+
+    Ok(out)
+}
+
+/// Fused LayerNorm along the last axis. Input viewed as
+/// `[n_outer × inner]` row-major; `gamma` and `beta` are length-`inner`.
+/// Per row: mean → variance → normalize → scale+bias, single pass.
+pub fn layernorm_f32(
+    input: &[f32],
+    gamma: &[f32],
+    beta: &[f32],
+    n_outer: usize,
+    inner: usize,
+    epsilon: f32,
+) -> Result<Vec<f32>, String> {
+    if input.len() != n_outer * inner {
+        return Err(format!(
+            "layernorm_f32: input len {} != n_outer*inner = {}",
+            input.len(),
+            n_outer * inner
+        ));
+    }
+    if gamma.len() != inner {
+        return Err(format!(
+            "layernorm_f32: gamma len {} != inner {}",
+            gamma.len(),
+            inner
+        ));
+    }
+    if beta.len() != inner {
+        return Err(format!(
+            "layernorm_f32: beta len {} != inner {}",
+            beta.len(),
+            inner
+        ));
+    }
+
+    let mut out = vec![0.0f32; n_outer * inner];
+
+    out.par_chunks_mut(inner)
+        .enumerate()
+        .for_each(|(i, row_out)| {
+            let row_in = &input[i * inner..(i + 1) * inner];
+            layernorm_row_f32(row_in, gamma, beta, epsilon, row_out);
+        });
+
+    Ok(out)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn layernorm_row_f32(input: &[f32], gamma: &[f32], beta: &[f32], eps: f32, out: &mut [f32]) {
+    use core::arch::aarch64::*;
+    let n = input.len();
+    let n_vec = n / 4;
+    let n_tail = n_vec * 4;
+
+    // Pass 1: sum (for mean) + sum-of-squares (for variance).
+    let mut sum_v = unsafe { vdupq_n_f32(0.0) };
+    let mut sumsq_v = unsafe { vdupq_n_f32(0.0) };
+    for i in 0..n_vec {
+        unsafe {
+            let v = vld1q_f32(input.as_ptr().add(i * 4));
+            sum_v = vaddq_f32(sum_v, v);
+            sumsq_v = vfmaq_f32(sumsq_v, v, v);
+        }
+    }
+    let mut sum = unsafe { vaddvq_f32(sum_v) };
+    let mut sumsq = unsafe { vaddvq_f32(sumsq_v) };
+    for i in n_tail..n {
+        let v = input[i];
+        sum += v;
+        sumsq += v * v;
+    }
+
+    let inv_n = 1.0 / (n as f32);
+    let mean = sum * inv_n;
+    let var = sumsq * inv_n - mean * mean;
+    let inv_std = (var + eps).sqrt().recip();
+
+    // Pass 2: out[i] = gamma[i] * ((input[i] - mean) * inv_std) + beta[i]
+    let mean_v = unsafe { vdupq_n_f32(mean) };
+    let inv_std_v = unsafe { vdupq_n_f32(inv_std) };
+    for i in 0..n_vec {
+        unsafe {
+            let x = vld1q_f32(input.as_ptr().add(i * 4));
+            let g = vld1q_f32(gamma.as_ptr().add(i * 4));
+            let b = vld1q_f32(beta.as_ptr().add(i * 4));
+            let centered = vsubq_f32(x, mean_v);
+            let normed = vmulq_f32(centered, inv_std_v);
+            // FMA: result = g * normed + b
+            let r = vfmaq_f32(b, g, normed);
+            vst1q_f32(out.as_mut_ptr().add(i * 4), r);
+        }
+    }
+    for i in n_tail..n {
+        out[i] = gamma[i] * ((input[i] - mean) * inv_std) + beta[i];
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn layernorm_row_f32(input: &[f32], gamma: &[f32], beta: &[f32], eps: f32, out: &mut [f32]) {
+    let n = input.len();
+    let mut sum = 0.0f32;
+    let mut sumsq = 0.0f32;
+    for &v in input {
+        sum += v;
+        sumsq += v * v;
+    }
+    let inv_n = 1.0 / (n as f32);
+    let mean = sum * inv_n;
+    let var = sumsq * inv_n - mean * mean;
+    let inv_std = (var + eps).sqrt().recip();
+    for i in 0..n {
+        out[i] = gamma[i] * ((input[i] - mean) * inv_std) + beta[i];
+    }
+}
+
 // Abramowitz & Stegun 7.1.26 — max abs error ~1.5e-7, well within f32.
 // erf is what Axon's GELU calls through Nx.erf, so we need a fast
 // builtin here (Rust std has no erf).

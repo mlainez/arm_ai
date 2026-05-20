@@ -680,6 +680,25 @@ defmodule NxArm.Backend do
     put_in(out.data, %__MODULE__{bin: out_bin})
   end
 
+  @doc "Fused GELU. Reached via NxArm.Compiler pattern fusion."
+  def nxarm_gelu(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor) do
+    bin = bin_of(tensor)
+    out_bin = NxArm.Native.gelu_f32_op(bin)
+    put_in(out.data, %__MODULE__{bin: out_bin})
+  end
+
+  @doc "Fused LayerNorm along the last axis. Reached via NxArm.Compiler pattern fusion."
+  def nxarm_layernorm(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor, %Nx.Tensor{} = gamma, %Nx.Tensor{} = beta, epsilon) do
+    rank = tuple_size(Nx.shape(tensor))
+    inner = elem(Nx.shape(tensor), rank - 1)
+    n_outer = div(Nx.size(tensor), inner)
+    bin = bin_of(tensor)
+    gamma_bin = bin_of(gamma)
+    beta_bin = bin_of(beta)
+    out_bin = NxArm.Native.layernorm_f32_op(bin, gamma_bin, beta_bin, n_outer, inner, epsilon)
+    put_in(out.data, %__MODULE__{bin: out_bin})
+  end
+
   # ── Internal helpers ──────────────────────────────────────
 
   defp bin_of(%Nx.Tensor{data: %__MODULE__{bin: bin}}) when not is_nil(bin), do: bin

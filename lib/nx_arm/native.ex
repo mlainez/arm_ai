@@ -111,6 +111,19 @@ defmodule NxArm.Native do
   @spec softmax_f32_op(binary(), non_neg_integer(), non_neg_integer()) :: binary()
   def softmax_f32_op(_input, _n_outer, _inner), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "Fused GELU activation: `((erf(x/√2)+1)*x)/2` in one pass."
+  @spec gelu_f32_op(binary()) :: binary()
+  def gelu_f32_op(_input), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Fused LayerNorm along the last axis. Input as `[n_outer × inner]`;
+  `gamma`/`beta` length-`inner`. Single pass per row: mean + variance,
+  then `gamma * (x - mean) / sqrt(var + eps) + beta`.
+  """
+  @spec layernorm_f32_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer(), float()) :: binary()
+  def layernorm_f32_op(_input, _gamma, _beta, _n_outer, _inner, _epsilon),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # ── Conv2D (NEON int8 + f32) ───────────────────────────
 
   @doc "2-D NEON int8 conv (f32 activations × int8 weights × f32 per-out-channel scales)."

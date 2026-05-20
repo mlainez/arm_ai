@@ -191,6 +191,46 @@ fn reduce_axis_f32_op<'a>(
     f32_vec_to_bin(env, &out)
 }
 
+/// Fused GELU. Replaces Axon's 5-primitive defn decomposition
+/// `((erf(x/√2)+1)*x)/2` with one NIF call.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn gelu_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+) -> NifResult<rustler::Binary<'a>> {
+    let input_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, input.len() / 4)
+    };
+    let out = shape_ops::gelu_f32(input_slice)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+/// Fused LayerNorm along the last axis. `gamma`/`beta` length-`inner`.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn layernorm_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    gamma: rustler::Binary<'a>,
+    beta: rustler::Binary<'a>,
+    n_outer: usize,
+    inner: usize,
+    epsilon: f64,
+) -> NifResult<rustler::Binary<'a>> {
+    let input_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, input.len() / 4)
+    };
+    let gamma_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(gamma.as_ptr() as *const f32, gamma.len() / 4)
+    };
+    let beta_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(beta.as_ptr() as *const f32, beta.len() / 4)
+    };
+    let out = shape_ops::layernorm_f32(input_slice, gamma_slice, beta_slice, n_outer, inner, epsilon as f32)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
 /// Fused softmax along the last axis. Replaces Axon's 7-primitive defn
 /// decomposition with one NIF call (one pass per row: max, exp, sum,
 /// divide).

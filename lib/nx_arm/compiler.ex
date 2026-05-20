@@ -56,10 +56,16 @@ defmodule NxArm.Compiler do
     hooks = Keyword.get(opts, :hooks, %{})
     gc? = Keyword.get(opts, :garbage_collect, false)
 
-    {expr, output, cache} = precompile(fun, vars, hooks)
+    # 1. Build the raw Expr tree (keep args intact for rewriting).
+    {expr, output} = build_raw_expr(fun, vars)
 
-    # Rewrite hook — no-op in Phase 1.
+    # 2. Phase-2 rewrite pass: pattern-fuse softmax / (next: GELU,
+    #    LayerNorm) into custom op nodes.
     expr = rewrite(expr)
+
+    # 3. Build the refcount cache on the rewritten tree (this is what
+    #    strips args).
+    {expr, cache} = init_compute_cache(expr, %{hooks: hooks, parent_ids: nil, current_ids: nil})
 
     fn [params] ->
       state = %{params: params, gc: gc?, hooks: hooks}
@@ -67,15 +73,170 @@ defmodule NxArm.Compiler do
     end
   end
 
+  defp build_raw_expr(fun, vars) do
+    {expr, output} =
+      vars
+      |> fun.()
+      |> Composite.traverse([], &{Nx.devectorize(&1), [Nx.to_template(&1) | &2]})
+
+    {expr, Enum.reverse(output)}
+  end
+
   @impl true
   def __shard_jit__(_key, _mesh, _vars, _fun, _args_list, _opts) do
     raise "sharding is not supported by NxArm.Compiler"
   end
 
-  # ── Rewrite hook ──────────────────────────────────────────
-  # Phase 2 will pattern-match softmax/GELU/LayerNorm subgraphs here.
+  # ── Rewrite pass ──────────────────────────────────────────
+  #
+  # Walks the Expr graph bottom-up. At each node, after children have
+  # been rewritten, tries to match a fusion pattern. If matched,
+  # replaces the subtree with a single custom-op node that dispatches
+  # to a fused NIF (NxArm.Backend.nxarm_softmax/3, etc).
 
-  defp rewrite(expr), do: expr
+  defp rewrite(expr) do
+    {result, _cache} = Nx.Defn.Composite.traverse(expr, %{}, &rewrite_node/2)
+    result
+  end
+
+  defp rewrite_node(%Nx.Tensor{data: %Expr{op: op}} = tensor, cache)
+       when op in [:tensor, :constant, :parameter] do
+    {tensor, cache}
+  end
+
+  defp rewrite_node(%Nx.Tensor{data: %Expr{id: id}} = tensor, cache) do
+    case cache do
+      %{^id => already} ->
+        {already, cache}
+
+      %{} ->
+        # Bottom-up: rewrite arg children first. For control-flow ops
+        # (:cond, :while, :fun, :block, :token, :metadata, :slice,
+        # :put_slice, :runtime_call) we fall back to identity for now
+        # — those don't show up in typical forward passes (Bumblebee
+        # ViT etc.) and adding fusion across them needs more care.
+        {new_args, cache} = Nx.Defn.Tree.apply_args(tensor, cache, &rewrite_node/2)
+        tensor_with_new = put_in(tensor.data.args, new_args)
+        rewritten = try_patterns(tensor_with_new)
+        {rewritten, Map.put(cache, id, rewritten)}
+    end
+  end
+
+  # ── Pattern matchers ─────────────────────────────────────
+
+  defp try_patterns(tensor) do
+    try_softmax_divide(tensor) ||
+      try_softmax_multiply(tensor) ||
+      tensor
+  end
+
+  # softmax composed as `e / s` (my manual form, sanity check).
+  #
+  # Tree shape:
+  #   divide(
+  #     exp_node = exp(subtract(x, broadcast(reduce_max(x, …)))),
+  #     broadcast(sum(exp_node_same_id, …), …)
+  #   )
+  defp try_softmax_divide(%Nx.Tensor{data: %Expr{op: :divide, args: [num, denom]}} = tensor) do
+    with %Nx.Tensor{data: %Expr{id: exp_id, op: :exp, args: [shifted]}} <- num,
+         {:ok, sum_t} <- unwrap_to_sum(denom),
+         %Nx.Tensor{data: %Expr{op: :sum, args: [inner_exp, sum_opts]}} <- sum_t,
+         %Nx.Tensor{data: %Expr{id: ^exp_id}} <- inner_exp,
+         %Nx.Tensor{data: %Expr{op: :subtract, args: [x, _broadcast_of_max]}} <- shifted,
+         {:ok, axis} <- last_axis_match(sum_opts, tensor) do
+      build_softmax(tensor, x, axis)
+    else
+      _ -> nil
+    end
+  end
+
+  # Accept either a bare sum or a broadcast-wrapped sum.
+  defp unwrap_to_sum(%Nx.Tensor{data: %Expr{op: :sum}} = sum_t), do: {:ok, sum_t}
+
+  defp unwrap_to_sum(%Nx.Tensor{data: %Expr{op: :broadcast, args: [inner | _]}}),
+    do: unwrap_to_sum(inner)
+
+  defp unwrap_to_sum(_), do: :error
+
+  defp try_softmax_divide(_), do: nil
+
+  # softmax composed as `reciprocal(s) * e` (Axon.Activations.softmax form).
+  #
+  # `reciprocal(z) = divide(1.0, z)` lowers to `divide(constant_1, z)` in defn.
+  #
+  # Tree shape:
+  #   multiply(
+  #     broadcast(divide(constant_1, sum(exp_node, …)), …),
+  #     exp_node_same_id
+  #   )
+  # (operands may be swapped — Nx.multiply commutes constant operands)
+  defp try_softmax_multiply(%Nx.Tensor{data: %Expr{op: :multiply, args: [left, right]}} = tensor) do
+    try_softmax_multiply_ordered(tensor, left, right) ||
+      try_softmax_multiply_ordered(tensor, right, left)
+  end
+
+  defp try_softmax_multiply(_), do: nil
+
+  defp try_softmax_multiply_ordered(tensor, recip_side, exp_side) do
+    with %Nx.Tensor{data: %Expr{id: exp_id, op: :exp, args: [shifted]}} <- exp_side,
+         %Nx.Tensor{data: %Expr{op: :subtract, args: [x, _broadcast_of_max]}} <- shifted,
+         {:ok, sum_t} <- unwrap_broadcast_or_div(recip_side),
+         %Nx.Tensor{data: %Expr{op: :sum, args: [inner_exp, sum_opts]}} <- sum_t,
+         %Nx.Tensor{data: %Expr{id: ^exp_id}} <- inner_exp,
+         {:ok, axis} <- last_axis_match(sum_opts, tensor) do
+      build_softmax(tensor, x, axis)
+    else
+      _ -> nil
+    end
+  end
+
+  # The reciprocal-side may be either:
+  #   - divide(constant_1, sum_t)             (no broadcast yet, scalar)
+  #   - broadcast(divide(constant_1, sum_t))  (broadcast wraps the divide)
+  defp unwrap_broadcast_or_div(%Nx.Tensor{data: %Expr{op: :broadcast, args: [inner | _]}}),
+    do: unwrap_broadcast_or_div(inner)
+
+  defp unwrap_broadcast_or_div(%Nx.Tensor{data: %Expr{op: :divide, args: [one, denom]}}) do
+    case one do
+      %Nx.Tensor{data: %Expr{op: :constant, args: [n]}} when n == 1 or n == 1.0 ->
+        {:ok, denom}
+
+      _ ->
+        :error
+    end
+  end
+
+  defp unwrap_broadcast_or_div(_), do: :error
+
+  # Confirm `sum`/`reduce_max` axes correspond to the last axis of the
+  # input tensor, the only configuration our fused softmax NIF handles.
+  defp last_axis_match(opts, tensor) when is_list(opts) do
+    axes = Keyword.get(opts, :axes, nil)
+    rank = tuple_size(Nx.shape(tensor))
+
+    case axes do
+      [axis] when axis == rank - 1 -> {:ok, rank - 1}
+      [axis] when axis == -1 -> {:ok, rank - 1}
+      _ -> :error
+    end
+  end
+
+  defp last_axis_match(_, _), do: :error
+
+  defp build_softmax(out_tensor, x, axis) do
+    if System.get_env("NXARM_TRACE_FUSION") == "1" do
+      IO.puts("[NxArm fusion] softmax shape=#{inspect(Nx.shape(out_tensor))} axis=#{axis}")
+    end
+
+    new_data = %Expr{
+      id: make_ref(),
+      op: :nxarm_softmax,
+      args: [x, axis],
+      context: out_tensor.data.context
+    }
+
+    %{out_tensor | data: new_data}
+  end
 
   # ── Precompile (build refcount cache; mirrors Nx.Defn.Evaluator) ──
 
@@ -86,17 +247,6 @@ defmodule NxArm.Compiler do
       end)
 
     result
-  end
-
-  defp precompile(fun, vars, hooks) do
-    {expr, output} =
-      vars
-      |> fun.()
-      |> Composite.traverse([], &{Nx.devectorize(&1), [Nx.to_template(&1) | &2]})
-
-    state = %{hooks: hooks, parent_ids: nil, current_ids: nil}
-    {expr, cache} = init_compute_cache(expr, state)
-    {expr, Enum.reverse(output), cache}
   end
 
   defp init_compute_cache(expr, state) do

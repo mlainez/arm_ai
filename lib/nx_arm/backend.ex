@@ -657,6 +657,29 @@ defmodule NxArm.Backend do
     %{out | data: fun.(tensor).data}
   end
 
+  # ── Custom fused ops (dispatched by NxArm.Compiler rewrite pass) ──
+
+  @doc """
+  Fused softmax. Reached only via the NxArm.Compiler pattern-fusion
+  pass — direct user code should call `NxArm.softmax/2` instead.
+  """
+  def nxarm_softmax(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor, axis) do
+    shape = Nx.shape(tensor) |> Tuple.to_list()
+    rank = length(shape)
+    axis = if axis < 0, do: axis + rank, else: axis
+
+    if axis != rank - 1 do
+      raise ArgumentError,
+            "nxarm_softmax currently only supports the last axis (got #{axis} for rank #{rank})"
+    end
+
+    inner = elem(Nx.shape(tensor), rank - 1)
+    n_outer = div(Nx.size(tensor), inner)
+    bin = bin_of(tensor)
+    out_bin = NxArm.Native.softmax_f32_op(bin, n_outer, inner)
+    put_in(out.data, %__MODULE__{bin: out_bin})
+  end
+
   # ── Internal helpers ──────────────────────────────────────
 
   defp bin_of(%Nx.Tensor{data: %__MODULE__{bin: bin}}) when not is_nil(bin), do: bin

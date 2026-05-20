@@ -30,8 +30,9 @@ Driven by the FP3+ ViT-tiny baseline; should generalise to any aarch64.
   16 fp32 accumulators in registers but reads B at full N stride
   every k step — wastes L1 (32 KB on A73) on the big (197×768)
   matmul. Block K by ~128 to keep B-panel in L1.
-- [ ] **Tier-1.6** — Wider matmul register tiles (8×8 or 8×12).
-  Cortex-A73 has 32 NEON v-regs, room for more accumulators.
+- [x] **Tier-1.6** — Wider matmul register tile (4×8). Done 2026-05-20
+  (commit `6ba8f83`). 1.1–1.2× on N-divisible-by-8 shapes; ViT-tiny
+  e2e in the noise — bottleneck has moved off compute.
 
 ## Tier 2 — `NxArm.Compiler` (Nx.Defn.Compiler implementation)
 

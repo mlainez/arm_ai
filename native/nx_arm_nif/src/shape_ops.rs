@@ -792,6 +792,140 @@ fn read_index(bytes: &[u8], size: usize) -> Result<usize, String> {
     }
 }
 
+/// Generic n-D window reduction (max / min / sum / product) on f32.
+/// Used as the backend for Nx.window_max, window_min, window_sum,
+/// window_product — and via decomposition for max_pool, avg_pool.
+///
+/// `window_dims` is per-input-axis window size; `strides` is per-axis;
+/// `padding` is a list of (low, high) padding amounts per axis.
+pub fn window_reduce_f32(
+    op: &str,
+    input: &[f32],
+    in_shape: &[usize],
+    window_dims: &[usize],
+    strides: &[usize],
+    padding: &[(isize, isize)],
+) -> Result<(Vec<f32>, Vec<usize>), String> {
+    let rank = in_shape.len();
+    if window_dims.len() != rank || strides.len() != rank || padding.len() != rank {
+        return Err(format!(
+            "window_reduce: rank mismatch (in={}, win={}, strides={}, pad={})",
+            rank,
+            window_dims.len(),
+            strides.len(),
+            padding.len()
+        ));
+    }
+
+    // Output shape per axis: floor((in_size + pad_lo + pad_hi - win) / stride) + 1
+    let out_shape: Vec<usize> = (0..rank)
+        .map(|k| {
+            let in_size = in_shape[k] as isize;
+            let (pad_lo, pad_hi) = padding[k];
+            let effective = in_size + pad_lo + pad_hi - window_dims[k] as isize;
+            if effective < 0 {
+                0
+            } else {
+                (effective / strides[k] as isize) as usize + 1
+            }
+        })
+        .collect();
+
+    let out_total: usize = out_shape.iter().product();
+    let mut out = vec![0.0f32; out_total];
+
+    let in_strides = {
+        let mut s = vec![0usize; rank];
+        if rank > 0 {
+            s[rank - 1] = 1;
+            for k in (0..rank - 1).rev() {
+                s[k] = s[k + 1] * in_shape[k + 1];
+            }
+        }
+        s
+    };
+
+    let out_strides = {
+        let mut s = vec![0usize; rank];
+        if rank > 0 {
+            s[rank - 1] = 1;
+            for k in (0..rank - 1).rev() {
+                s[k] = s[k + 1] * out_shape[k + 1];
+            }
+        }
+        s
+    };
+
+    let init = match op {
+        "max" => f32::NEG_INFINITY,
+        "min" => f32::INFINITY,
+        "sum" => 0.0,
+        "product" => 1.0,
+        other => return Err(format!("unknown window op: {}", other)),
+    };
+
+    let pad_lows: Vec<isize> = padding.iter().map(|(lo, _)| *lo).collect();
+
+    // Total window volume (product of window_dims) for the inner loop.
+    let win_total: usize = window_dims.iter().product();
+
+    // For each output cell, gather window elements and reduce.
+    use rayon::prelude::*;
+    out.par_iter_mut().enumerate().for_each(|(out_flat, slot)| {
+        // Decode out_flat to multi-index.
+        let mut out_idx = vec![0usize; rank];
+        let mut rem = out_flat;
+        for k in 0..rank {
+            out_idx[k] = if out_strides[k] == 0 { 0 } else { rem / out_strides[k] };
+            rem -= out_idx[k] * out_strides[k];
+        }
+
+        let mut acc = init;
+        // Walk the window.
+        for win_flat in 0..win_total {
+            // Decode window index.
+            let mut win_idx = vec![0usize; rank];
+            let mut r = win_flat;
+            for k in (0..rank).rev() {
+                win_idx[k] = r % window_dims[k];
+                r /= window_dims[k];
+            }
+
+            // Compute corresponding input multi-index.
+            let mut in_off = 0usize;
+            let mut out_of_bounds = false;
+            for k in 0..rank {
+                let in_idx = out_idx[k] as isize * strides[k] as isize - pad_lows[k]
+                    + win_idx[k] as isize;
+                if in_idx < 0 || in_idx >= in_shape[k] as isize {
+                    out_of_bounds = true;
+                    break;
+                }
+                in_off += in_idx as usize * in_strides[k];
+            }
+
+            if !out_of_bounds {
+                let v = input[in_off];
+                acc = match op {
+                    "max" => if v > acc { v } else { acc },
+                    "min" => if v < acc { v } else { acc },
+                    "sum" => acc + v,
+                    "product" => acc * v,
+                    _ => unreachable!(),
+                };
+            }
+            // For out-of-bounds (padded) cells we use the identity for
+            // the reduction (matches BinaryBackend's behavior for max/
+            // min where padding contributes -inf/inf, and sum where it
+            // contributes 0).
+        }
+
+        *slot = acc;
+    });
+
+    Ok((out, out_shape))
+}
+
 /// Strided n-D slice. Output shape is `lengths`. For each output
 /// position, source position is `starts + out_pos * strides`. With
 /// unit strides we coalesce trailing axes into row-memcpys (fast).

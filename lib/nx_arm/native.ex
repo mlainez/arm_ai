@@ -193,4 +193,21 @@ defmodule NxArm.Native do
   @spec depthwise_conv2d_f32_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) :: binary()
   def depthwise_conv2d_f32_op(_input, _weight, _bias, _dims, _stride, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Generic n-D window reduction: `op` in `~w(max min sum product)`.
+  Used as the backend for `window_max/min/sum/product` and via
+  decomposition for max_pool/avg_pool.
+  """
+  @spec window_reduce_f32_op(
+          String.t(),
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [integer()],
+          [integer()]
+        ) :: binary()
+  def window_reduce_f32_op(_op, _input, _in_shape, _window_dims, _strides, _pad_low, _pad_high),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

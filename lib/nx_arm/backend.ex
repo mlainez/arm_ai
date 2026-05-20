@@ -793,20 +793,35 @@ defmodule NxArm.Backend do
     do: fallback(:window_reduce, [out, tensor, acc, shape, opts, fun])
 
   @impl true
-  def window_sum(out, tensor, shape, opts),
-    do: fallback(:window_sum, [out, tensor, shape, opts])
+  def window_sum(out, tensor, shape, opts), do: do_window(out, tensor, shape, opts, "sum")
 
   @impl true
-  def window_product(out, tensor, shape, opts),
-    do: fallback(:window_product, [out, tensor, shape, opts])
+  def window_product(out, tensor, shape, opts), do: do_window(out, tensor, shape, opts, "product")
 
   @impl true
-  def window_max(out, tensor, shape, opts),
-    do: fallback(:window_max, [out, tensor, shape, opts])
+  def window_max(out, tensor, shape, opts), do: do_window(out, tensor, shape, opts, "max")
 
   @impl true
-  def window_min(out, tensor, shape, opts),
-    do: fallback(:window_min, [out, tensor, shape, opts])
+  def window_min(out, tensor, shape, opts), do: do_window(out, tensor, shape, opts, "min")
+
+  defp do_window(out, tensor, window_shape, opts, op) do
+    if Nx.type(tensor) == {:f, 32} do
+      in_shape = Nx.shape(tensor) |> Tuple.to_list()
+      window_dims = window_shape |> Tuple.to_list()
+      strides = opts[:strides] || List.duplicate(1, length(window_dims))
+      padding = opts[:padding] || List.duplicate({0, 0}, length(window_dims))
+      pad_low = Enum.map(padding, fn {lo, _} -> lo end)
+      pad_high = Enum.map(padding, fn {_, hi} -> hi end)
+
+      bin = bin_of(tensor)
+      out_bin =
+        NxArm.Native.window_reduce_f32_op(op, bin, in_shape, window_dims, strides, pad_low, pad_high)
+
+      put_in(out.data, %__MODULE__{bin: out_bin})
+    else
+      fallback(String.to_atom("window_" <> op), [out, tensor, window_shape, opts])
+    end
+  end
 
   @impl true
   def sort(out, tensor, opts), do: fallback(:sort, [out, tensor, opts])

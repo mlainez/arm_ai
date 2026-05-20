@@ -72,6 +72,34 @@ fn transpose_op<'a>(
 /// lookup) use `axes = [0]` — that goes through the fast contiguous
 /// memcpy path.
 #[rustler::nif(schedule = "DirtyCpu")]
+fn window_reduce_f32_op<'a>(
+    env: Env<'a>,
+    op: String,
+    input: rustler::Binary<'a>,
+    in_shape: Vec<usize>,
+    window_dims: Vec<usize>,
+    strides: Vec<usize>,
+    pad_low: Vec<i64>,
+    pad_high: Vec<i64>,
+) -> NifResult<rustler::Binary<'a>> {
+    let n = input.len() / 4;
+    let in_slice: &[f32] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr() as *const f32, n) };
+
+    let padding: Vec<(isize, isize)> = pad_low
+        .iter()
+        .zip(pad_high.iter())
+        .map(|(&lo, &hi)| (lo as isize, hi as isize))
+        .collect();
+
+    let (out_vec, _out_shape) =
+        shape_ops::window_reduce_f32(&op, in_slice, &in_shape, &window_dims, &strides, &padding)
+            .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+
+    f32_vec_to_bin(env, &out_vec)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 fn slice_op<'a>(
     env: Env<'a>,
     input: rustler::Binary<'a>,

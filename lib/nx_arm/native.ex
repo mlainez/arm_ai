@@ -195,6 +195,27 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Weight-only int8 matmul: f32 activations × int8 weights × f32 per-row
+  scales. Returns f32 output. Layout matches batched_matmul_f32 with
+  `right_transposed = true` (acts {B,M,K} × weights {N,K} → out {B,M,N}).
+
+  Used to run quantized LLMs (GPTQ Q8_0 / llama.cpp-style) on Nerves
+  devices — weights stay int8 (4× memory savings vs f32) while the
+  matmul itself dequantizes and accumulates in f32.
+  """
+  @spec dequant_matmul_int8_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
+  def dequant_matmul_int8_f32_op(_act, _weights, _scales, _b, _m, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Generic n-D window reduction: `op` in `~w(max min sum product)`.
   Used as the backend for `window_max/min/sum/product` and via
   decomposition for max_pool/avg_pool.

@@ -71,6 +71,36 @@ fn transpose_op<'a>(
 /// the trailing dim of `indices`. Most callers (token-embedding
 /// lookup) use `axes = [0]` — that goes through the fast contiguous
 /// memcpy path.
+/// Weight-only int8 matmul: f32 acts × int8 weights × f32 per-row
+/// scales. Layout matches batched_matmul_f32 with `right_transposed=true`
+/// (acts and weights both contract on last axis).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn dequant_matmul_int8_f32_op<'a>(
+    env: Env<'a>,
+    act: rustler::Binary<'a>,
+    weights: rustler::Binary<'a>,
+    scales: rustler::Binary<'a>,
+    b: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let act_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(act.as_ptr() as *const f32, b * m * k)
+    };
+    let weights_slice: &[i8] = unsafe {
+        std::slice::from_raw_parts(weights.as_ptr() as *const i8, n * k)
+    };
+    let scales_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(scales.as_ptr() as *const f32, n)
+    };
+
+    let out = shape_ops::dequant_matmul_int8_f32(act_slice, weights_slice, scales_slice, b, m, n, k)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+
+    f32_vec_to_bin(env, &out)
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn window_reduce_f32_op<'a>(
     env: Env<'a>,

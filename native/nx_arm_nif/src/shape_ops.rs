@@ -792,6 +792,80 @@ fn read_index(bytes: &[u8], size: usize) -> Result<usize, String> {
     }
 }
 
+/// Weight-only int8 matmul: `act` f32 × `weights` int8, per-row
+/// (per-output-channel) f32 scales. Computes
+///
+///   `out[b, m, n] = scales[n] * sum_k(act[b, m, k] * (f32)weights[n, k])`
+///
+/// where `weights` is laid out `[N, K]` (one output channel per row,
+/// contiguous over K). This is the "GPTQ-style" pattern used by
+/// llama.cpp Q8_0 and other quantized model formats — the weights
+/// stay int8 (4× memory savings vs f32) and the matmul itself runs
+/// dequantize-and-accumulate in f32. Without SDOT (Cortex-A73 is
+/// pre-ARMv8.2) this is the realistic int8 path on this hardware.
+///
+/// Layout matches our batched_matmul_f32 with `right_transposed = true`
+/// (Q @ K^T pattern) — both sides contract on their last axis. For a
+/// 2-D linear layer (b=1), it's `act[M, K] · weights[N, K]^T = [M, N]`.
+pub fn dequant_matmul_int8_f32(
+    act: &[f32],
+    weights: &[i8],
+    scales: &[f32],
+    b: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<Vec<f32>, String> {
+    if act.len() != b * m * k {
+        return Err(format!(
+            "dequant_matmul_int8: act len {} != B*M*K = {}",
+            act.len(),
+            b * m * k
+        ));
+    }
+    if weights.len() != n * k {
+        return Err(format!(
+            "dequant_matmul_int8: weights len {} != N*K = {}",
+            weights.len(),
+            n * k
+        ));
+    }
+    if scales.len() != n {
+        return Err(format!(
+            "dequant_matmul_int8: scales len {} != N = {}",
+            scales.len(),
+            n
+        ));
+    }
+
+    let mut out = vec![0.0f32; b * m * n];
+
+    use rayon::prelude::*;
+    out.par_chunks_mut(n).enumerate().for_each(|(bi_row, row)| {
+        let batch = bi_row / m;
+        let i = bi_row % m;
+        let a_base = batch * m * k + i * k;
+        let a = &act[a_base..a_base + k];
+
+        for j in 0..n {
+            let w_base = j * k;
+            let w = &weights[w_base..w_base + k];
+            let s = scales[j];
+
+            // Sequential f32 accumulation; NEON FMA via the auto-
+            // vectoriser. The int8→f32 cast in `w[kk] as f32` produces
+            // VCVTQ-style widening ops naturally.
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += a[kk] * (w[kk] as f32);
+            }
+            row[j] = acc * s;
+        }
+    });
+
+    Ok(out)
+}
+
 /// Generic n-D window reduction (max / min / sum / product) on f32.
 /// Used as the backend for Nx.window_max, window_min, window_sum,
 /// window_product — and via decomposition for max_pool, avg_pool.

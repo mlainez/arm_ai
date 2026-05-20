@@ -700,6 +700,101 @@ pub fn elementwise_unary_f32(op: &str, a: &[f32]) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
+/// Fused softmax along the last axis. Input viewed as `[n_outer ×
+/// inner]` row-major; each row gets `softmax(x) = exp(x - max(x)) /
+/// sum(exp(x - max(x)))` in a single pass. Replaces the 7-primitive
+/// Axon defn decomposition with one NIF call — saves the 6 intermediate
+/// `Vec<f32>` allocations and the broadcast + elementwise dispatch
+/// overhead.
+pub fn softmax_f32(input: &[f32], n_outer: usize, inner: usize) -> Result<Vec<f32>, String> {
+    if input.len() != n_outer * inner {
+        return Err(format!(
+            "softmax_f32: len {} != n_outer*inner = {}",
+            input.len(),
+            n_outer * inner
+        ));
+    }
+    let mut out = vec![0.0f32; n_outer * inner];
+
+    out.par_chunks_mut(inner)
+        .enumerate()
+        .for_each(|(i, row_out)| {
+            let row_in = &input[i * inner..(i + 1) * inner];
+            softmax_row_f32(row_in, row_out);
+        });
+
+    Ok(out)
+}
+
+/// One row of softmax. Three passes over the row (max, exp+sum, divide)
+/// but each pass NEON-vectorised; the row stays hot in L1 between passes.
+#[cfg(target_arch = "aarch64")]
+fn softmax_row_f32(input: &[f32], out: &mut [f32]) {
+    use core::arch::aarch64::*;
+    let n = input.len();
+    let n_vec = n / 4;
+    let n_tail = n_vec * 4;
+
+    // Pass 1: max(x). vmaxq_f32 + vmaxvq_f32 reduce.
+    let mut max_vec = unsafe { vdupq_n_f32(f32::NEG_INFINITY) };
+    for i in 0..n_vec {
+        unsafe {
+            let v = vld1q_f32(input.as_ptr().add(i * 4));
+            max_vec = vmaxq_f32(max_vec, v);
+        }
+    }
+    let mut max_val = unsafe { vmaxvq_f32(max_vec) };
+    for i in n_tail..n {
+        if input[i] > max_val {
+            max_val = input[i];
+        }
+    }
+
+    // Pass 2: out[i] = exp(input[i] - max); sum += out[i].
+    // exp is libm (vector libm not available), but the loads/stores
+    // remain vector-aligned so we still benefit on the memory side.
+    let mut sum = 0.0f32;
+    for i in 0..n {
+        let e = (input[i] - max_val).exp();
+        out[i] = e;
+        sum += e;
+    }
+
+    // Pass 3: divide by sum.
+    let inv = 1.0 / sum;
+    let inv_vec = unsafe { vdupq_n_f32(inv) };
+    for i in 0..n_vec {
+        unsafe {
+            let v = vld1q_f32(out.as_ptr().add(i * 4));
+            let r = vmulq_f32(v, inv_vec);
+            vst1q_f32(out.as_mut_ptr().add(i * 4), r);
+        }
+    }
+    for i in n_tail..n {
+        out[i] *= inv;
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn softmax_row_f32(input: &[f32], out: &mut [f32]) {
+    let mut max_val = f32::NEG_INFINITY;
+    for &v in input {
+        if v > max_val {
+            max_val = v;
+        }
+    }
+    let mut sum = 0.0f32;
+    for (i, &v) in input.iter().enumerate() {
+        let e = (v - max_val).exp();
+        out[i] = e;
+        sum += e;
+    }
+    let inv = 1.0 / sum;
+    for v in out.iter_mut() {
+        *v *= inv;
+    }
+}
+
 // Abramowitz & Stegun 7.1.26 — max abs error ~1.5e-7, well within f32.
 // erf is what Axon's GELU calls through Nx.erf, so we need a fast
 // builtin here (Rust std has no erf).

@@ -662,6 +662,10 @@ defmodule NxArm.Backend do
   defp bin_of(%Nx.Tensor{data: %__MODULE__{bin: bin}}) when not is_nil(bin), do: bin
   defp bin_of(%Nx.Tensor{} = t), do: Nx.to_binary(t)
 
+  @doc false
+  # Public for use by NxArm fused-op helpers (e.g. NxArm.softmax).
+  def __bin_of__(t), do: bin_of(t)
+
   defp element_size({_kind, bits}) when rem(bits, 8) == 0, do: div(bits, 8)
   defp element_size({:bf, 16}), do: 2
 

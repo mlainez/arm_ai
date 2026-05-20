@@ -103,6 +103,14 @@ defmodule NxArm.Native do
   def reduce_axis_f32_op(_op, _input, _n_outer, _inner),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Fused softmax along the last axis. Input viewed as `[n_outer × inner]`
+  row-major; each row gets the numerically-stable
+  `softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))` in a single pass.
+  """
+  @spec softmax_f32_op(binary(), non_neg_integer(), non_neg_integer()) :: binary()
+  def softmax_f32_op(_input, _n_outer, _inner), do: :erlang.nif_error(:nif_not_loaded)
+
   # ── Conv2D (NEON int8 + f32) ───────────────────────────
 
   @doc "2-D NEON int8 conv (f32 activations × int8 weights × f32 per-out-channel scales)."

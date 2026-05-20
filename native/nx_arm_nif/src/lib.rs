@@ -181,6 +181,24 @@ fn reduce_axis_f32_op<'a>(
     f32_vec_to_bin(env, &out)
 }
 
+/// Fused softmax along the last axis. Replaces Axon's 7-primitive defn
+/// decomposition with one NIF call (one pass per row: max, exp, sum,
+/// divide).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn softmax_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    n_outer: usize,
+    inner: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let input_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, input.len() / 4)
+    };
+    let out = shape_ops::softmax_f32(input_slice, n_outer, inner)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
 // ── conv2d (NEON int8 + f32) ────────────────────────────
 
 #[rustler::nif(schedule = "DirtyCpu")]

@@ -1,0 +1,361 @@
+defmodule NxArm.GGUF do
+  @moduledoc """
+  Minimal reader for the llama.cpp GGUF v3 model format. Parses the
+  header, metadata key/value pairs, and tensor catalogue; returns
+  raw byte slices for each tensor on demand.
+
+  Quantized tensors (Q4_0, Q8_0, …) are returned as their packed
+  byte representations together with shape + dtype, so callers can
+  feed them straight into the matching NxArm NIFs (e.g.
+  `int4_matmul_f32_op` for Q4_0).
+  """
+
+  @magic "GGUF"
+
+  # GGUF metadata value types (gguf.md).
+  @vt_u8 0
+  @vt_i8 1
+  @vt_u16 2
+  @vt_i16 3
+  @vt_u32 4
+  @vt_i32 5
+  @vt_f32 6
+  @vt_bool 7
+  @vt_string 8
+  @vt_array 9
+  @vt_u64 10
+  @vt_i64 11
+  @vt_f64 12
+
+  # GGUF tensor dtypes (subset of ggml types we expose by name).
+  @tensor_types %{
+    0 => :f32,
+    1 => :f16,
+    2 => :q4_0,
+    3 => :q4_1,
+    6 => :q5_0,
+    7 => :q5_1,
+    8 => :q8_0,
+    9 => :q8_1,
+    24 => :i8,
+    25 => :i16,
+    26 => :i32,
+    27 => :i64,
+    28 => :f64,
+    29 => :bf16
+  }
+
+  defstruct [
+    :version,
+    :metadata,
+    :tensors,
+    :data_offset,
+    :file_contents
+  ]
+
+  @type tensor_info :: %{
+          name: String.t(),
+          dtype: atom(),
+          shape: [non_neg_integer()],
+          offset: non_neg_integer(),
+          byte_size: non_neg_integer()
+        }
+
+  @type t :: %__MODULE__{
+          version: non_neg_integer(),
+          metadata: map(),
+          tensors: %{String.t() => tensor_info()},
+          data_offset: non_neg_integer(),
+          file_contents: binary()
+        }
+
+  @doc """
+  Read a GGUF file. Loads the full file into memory (use `read_mmap/1`
+  on Linux once `E1` lands for very large models).
+  """
+  @spec read(Path.t()) :: {:ok, t()} | {:error, term()}
+  def read(path) do
+    case File.read(path) do
+      {:ok, bin} -> parse(bin)
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc "Parse already-loaded GGUF bytes."
+  @spec parse(binary()) :: {:ok, t()} | {:error, term()}
+  def parse(<<@magic, version::little-32, tensor_count::little-64, meta_count::little-64,
+              rest::binary>> = bin) do
+    with {:ok, metadata, rest1} <- read_metadata(rest, meta_count, %{}),
+         {:ok, tensors, rest2} <- read_tensor_infos(rest1, tensor_count, []) do
+      alignment = Map.get(metadata, "general.alignment", 32)
+      consumed = byte_size(bin) - byte_size(rest2)
+      pad = rem(alignment - rem(consumed, alignment), alignment)
+      data_offset = consumed + pad
+
+      tensors_with_size =
+        tensors
+        |> Enum.map(&Map.put(&1, :byte_size, tensor_byte_size(&1)))
+        |> Map.new(fn t -> {t.name, t} end)
+
+      {:ok,
+       %__MODULE__{
+         version: version,
+         metadata: metadata,
+         tensors: tensors_with_size,
+         data_offset: data_offset,
+         file_contents: bin
+       }}
+    end
+  end
+
+  def parse(_), do: {:error, :not_a_gguf_file}
+
+  @doc """
+  Return the raw byte slice for a tensor. For F32/F16/BF16/I*/F64 this
+  is just the packed values; for quantized formats (Q4_0 etc.) it is
+  the GGML block layout (see gguf.md for the format of each block).
+  """
+  @spec tensor_bytes(t(), String.t()) :: {:ok, binary()} | {:error, :not_found}
+  def tensor_bytes(%__MODULE__{tensors: ts, data_offset: base, file_contents: bin}, name) do
+    case Map.fetch(ts, name) do
+      {:ok, %{offset: off, byte_size: sz}} ->
+        {:ok, binary_part(bin, base + off, sz)}
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  For a Q4_0 tensor, split the GGML block bytes into the `{packed,
+  scales}` pair our `int4_matmul_f32_op` expects.
+
+  GGML Q4_0 block layout (one block = 32 weights):
+    * `d`: f16 scale (2 bytes)
+    * `qs`: 16 packed bytes (32 nibbles)
+
+  We unpack to:
+    * `scales`: `[N, K/32]` f32 LE
+    * `packed`: `[N, K/2]` u8
+
+  The shape is the tensor's ggml shape, with K being the last
+  dimension and N the product of the leading dimensions.
+  """
+  @spec q4_0_unpack(t(), String.t()) ::
+          {:ok, %{packed: binary(), scales: binary(), n: pos_integer(), k: pos_integer()}}
+          | {:error, term()}
+  def q4_0_unpack(gguf, name) do
+    with {:ok, info} <- Map.fetch(gguf.tensors, name) |> ok_or(:not_found),
+         :q4_0 <- info.dtype,
+         {:ok, raw} <- tensor_bytes(gguf, name) do
+      # ggml row-major: dim 0 is the contraction axis (K), the rest
+      # are output dimensions.
+      [k | rest_dims] = info.shape
+      n = Enum.reduce(rest_dims, 1, &(&1 * &2))
+
+      if rem(k, 32) != 0 do
+        {:error, {:bad_q4_0_shape, info.shape}}
+      else
+        n_groups = div(k, 32)
+        {packed, scales} = split_q4_0(raw, n, n_groups)
+        {:ok, %{packed: packed, scales: scales, n: n, k: k}}
+      end
+    else
+      dtype when is_atom(dtype) -> {:error, {:not_q4_0, dtype}}
+      err -> err
+    end
+  end
+
+  # --------------------------------------------------------------
+  # Internal: metadata parsing.
+  # --------------------------------------------------------------
+
+  defp read_metadata(rest, 0, acc), do: {:ok, acc, rest}
+
+  defp read_metadata(rest, n, acc) when n > 0 do
+    with {:ok, key, rest1} <- read_string(rest),
+         <<vtype::little-32, rest2::binary>> <- rest1,
+         {:ok, val, rest3} <- read_value(vtype, rest2) do
+      read_metadata(rest3, n - 1, Map.put(acc, key, val))
+    else
+      err -> {:error, {:bad_metadata, err}}
+    end
+  end
+
+  defp read_value(@vt_u8, <<v::little-8, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_i8, <<v::little-signed-8, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_u16, <<v::little-16, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_i16, <<v::little-signed-16, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_u32, <<v::little-32, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_i32, <<v::little-signed-32, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_f32, <<v::float-32-little, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_bool, <<v::little-8, rest::binary>>), do: {:ok, v != 0, rest}
+  defp read_value(@vt_u64, <<v::little-64, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_i64, <<v::little-signed-64, rest::binary>>), do: {:ok, v, rest}
+  defp read_value(@vt_f64, <<v::float-64-little, rest::binary>>), do: {:ok, v, rest}
+
+  defp read_value(@vt_string, bin) do
+    case read_string(bin) do
+      {:ok, s, rest} -> {:ok, s, rest}
+      err -> err
+    end
+  end
+
+  defp read_value(@vt_array, <<inner_vt::little-32, n::little-64, rest::binary>>) do
+    Enum.reduce_while(1..n//1, {:ok, [], rest}, fn _, {:ok, acc, r} ->
+      case read_value(inner_vt, r) do
+        {:ok, v, r2} -> {:cont, {:ok, [v | acc], r2}}
+        err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, vs, r} -> {:ok, Enum.reverse(vs), r}
+      err -> err
+    end
+  end
+
+  defp read_value(@vt_array, <<inner_vt::little-32, 0::little-64, rest::binary>>) do
+    _ = inner_vt
+    {:ok, [], rest}
+  end
+
+  defp read_value(t, _), do: {:error, {:bad_value_type, t}}
+
+  defp read_string(<<len::little-64, str::binary-size(len), rest::binary>>) do
+    {:ok, str, rest}
+  end
+
+  defp read_string(_), do: {:error, :short_string}
+
+  # --------------------------------------------------------------
+  # Internal: tensor info parsing.
+  # --------------------------------------------------------------
+
+  defp read_tensor_infos(rest, 0, acc), do: {:ok, Enum.reverse(acc), rest}
+
+  defp read_tensor_infos(rest, n, acc) when n > 0 do
+    with {:ok, name, rest1} <- read_string(rest),
+         <<n_dims::little-32, rest2::binary>> <- rest1,
+         {:ok, dims, rest3} <- read_dims(rest2, n_dims, []),
+         <<ttype::little-32, offset::little-64, rest4::binary>> <- rest3 do
+      dtype = Map.get(@tensor_types, ttype, {:unknown, ttype})
+
+      info = %{
+        name: name,
+        dtype: dtype,
+        shape: Enum.reverse(dims),
+        offset: offset
+      }
+
+      read_tensor_infos(rest4, n - 1, [info | acc])
+    else
+      err -> {:error, {:bad_tensor_info, err}}
+    end
+  end
+
+  defp read_dims(rest, 0, acc), do: {:ok, acc, rest}
+
+  defp read_dims(<<d::little-64, rest::binary>>, n, acc) when n > 0 do
+    read_dims(rest, n - 1, [d | acc])
+  end
+
+  # --------------------------------------------------------------
+  # Internal: dtype size helpers.
+  # --------------------------------------------------------------
+
+  defp tensor_byte_size(%{dtype: dtype, shape: shape}) do
+    n_elems = Enum.reduce(shape, 1, &(&1 * &2))
+
+    case dtype do
+      :f32 -> n_elems * 4
+      :f64 -> n_elems * 8
+      :f16 -> n_elems * 2
+      :bf16 -> n_elems * 2
+      :i8 -> n_elems
+      :i16 -> n_elems * 2
+      :i32 -> n_elems * 4
+      :i64 -> n_elems * 8
+      # Q4_0: 32 weights / block, block = 2 bytes scale + 16 bytes packed = 18 bytes.
+      :q4_0 -> div(n_elems, 32) * 18
+      # Q4_1: 32 weights / block, block = 2 bytes scale + 2 bytes min + 16 bytes packed = 20 bytes.
+      :q4_1 -> div(n_elems, 32) * 20
+      # Q5_0: 32 weights / block, block = 22 bytes (2 + 4 + 16).
+      :q5_0 -> div(n_elems, 32) * 22
+      # Q5_1: 32 weights / block, block = 24 bytes (2 + 2 + 4 + 16).
+      :q5_1 -> div(n_elems, 32) * 24
+      # Q8_0: 32 weights / block, block = 2 + 32 = 34 bytes.
+      :q8_0 -> div(n_elems, 32) * 34
+      # Q8_1: 32 weights / block, block = 2 + 2 + 32 = 36 bytes.
+      :q8_1 -> div(n_elems, 32) * 36
+      {:unknown, _} -> 0
+    end
+  end
+
+  # --------------------------------------------------------------
+  # Internal: Q4_0 block unpacking.
+  # --------------------------------------------------------------
+
+  defp split_q4_0(raw, n_rows, n_groups) do
+    # Each block is 18 bytes: <<scale_f16::2, qs::16>>.
+    # We accumulate scales as f32 and packed bytes verbatim.
+    do_split_rows(raw, n_rows, n_groups, [], [])
+  end
+
+  defp do_split_rows(_rest, 0, _ng, packed_acc, scales_acc) do
+    {IO.iodata_to_binary(Enum.reverse(packed_acc)),
+     IO.iodata_to_binary(Enum.reverse(scales_acc))}
+  end
+
+  defp do_split_rows(rest, rows_left, n_groups, packed_acc, scales_acc) do
+    {row_packed, row_scales, rest1} = do_split_groups(rest, n_groups, [], [])
+
+    do_split_rows(
+      rest1,
+      rows_left - 1,
+      n_groups,
+      [row_packed | packed_acc],
+      [row_scales | scales_acc]
+    )
+  end
+
+  defp do_split_groups(rest, 0, packed_acc, scales_acc) do
+    {Enum.reverse(packed_acc), Enum.reverse(scales_acc), rest}
+  end
+
+  defp do_split_groups(<<scale_f16::little-16, packed::binary-size(16), rest::binary>>, g, p_acc, s_acc) do
+    scale_f32 = f16_to_f32(scale_f16)
+    do_split_groups(rest, g - 1, [packed | p_acc], [<<scale_f32::float-32-little>> | s_acc])
+  end
+
+  # IEEE 754 binary16 → binary32. Standard layout: 1 sign / 5 exp / 10
+  # mantissa. Subnormals become normalised f32, NaN/Inf propagated.
+  defp f16_to_f32(h) do
+    s = Bitwise.bsr(h, 15) |> Bitwise.band(0x1)
+    e = Bitwise.bsr(h, 10) |> Bitwise.band(0x1F)
+    m = Bitwise.band(h, 0x3FF)
+
+    cond do
+      e == 0 and m == 0 ->
+        if s == 1, do: -0.0, else: 0.0
+
+      e == 0 ->
+        # Subnormal: 2^-14 · (m / 1024) · (-1)^s.
+        sign = if s == 1, do: -1.0, else: 1.0
+        sign * :math.pow(2, -14) * m / 1024.0
+
+      e == 31 ->
+        cond do
+          m == 0 and s == 0 -> :infinity
+          m == 0 and s == 1 -> :negative_infinity
+          true -> :nan
+        end
+
+      true ->
+        sign = if s == 1, do: -1.0, else: 1.0
+        sign * :math.pow(2, e - 15) * (1.0 + m / 1024.0)
+    end
+  end
+
+  defp ok_or({:ok, _} = ok, _), do: ok
+  defp ok_or(:error, reason), do: {:error, reason}
+end

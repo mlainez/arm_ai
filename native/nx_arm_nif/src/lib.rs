@@ -6,6 +6,7 @@
 // and dispatches each Nx callback to one of these.
 
 mod conv_int8;
+mod llama_candle;
 mod ops;
 mod shape_ops;
 mod topology;
@@ -1633,8 +1634,31 @@ fn reverse_op<'a>(
     Ok(out_bin.release(env))
 }
 
+// ---------------------------------------------------------------
+// candle bridge for Llama-family models.
+// ---------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn llama_candle_load_op(path: String) -> NifResult<ResourceArc<llama_candle::LlamaResource>> {
+    let res = llama_candle::load_model(&path)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("candle load: {}", e))))?;
+    Ok(ResourceArc::new(res))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn llama_candle_generate_op(
+    model: ResourceArc<llama_candle::LlamaResource>,
+    prompt: Vec<u32>,
+    max_new: usize,
+) -> NifResult<(Vec<u32>, u64, u64)> {
+    let result = llama_candle::generate_greedy(&model, &prompt, max_new)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("candle generate: {}", e))))?;
+    Ok((result.tokens, result.prefill_us, result.decode_us))
+}
+
 fn load(env: Env, _info: rustler::Term) -> bool {
     rustler::resource!(MmapResource, env);
+    rustler::resource!(llama_candle::LlamaResource, env);
     true
 }
 

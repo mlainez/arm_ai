@@ -415,6 +415,25 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Load a quantised Llama-family GGUF file via the upstream `candle`
+  crate. Returns a model handle that subsequent `llama_candle_*` NIFs
+  consume. Supports Q4_0 / Q4_K / Q5_0 / Q5_K / Q6_K / Q8_0 — every
+  k-quant ggml ships, courtesy of candle's GGML reader.
+  """
+  @spec llama_candle_load_op(String.t()) :: reference()
+  def llama_candle_load_op(_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Greedy decode via `candle`. Returns `{generated_token_ids,
+  prefill_us, decode_us}`.
+  """
+  @spec llama_candle_generate_op(reference(), [non_neg_integer()], non_neg_integer()) ::
+          {[non_neg_integer()], non_neg_integer(), non_neg_integer()}
+  def llama_candle_generate_op(_model, _prompt, _max_new),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Int8 matmul with per-token activation scales. `act_scales` is a
   length-M f32 LE binary -- one scale per row of A. Equivalent to
   `int8_matmul_f32_op` but with per-row dequant, recovering accuracy

@@ -12,3 +12,14 @@ crate-type = ["cdylib"]
 rustler = "0.36"
 rayon = "1.10"
 memmap2 = "0.9"
+
+# Upstream LLM stack — adopted per the "use the crate if it's
+# faster" policy. candle-core ships hand-tuned ARMv8 NEON kernels
+# for Q4_0/Q4_K/Q8_0; candle-transformers ships Llama/Mistral/Phi
+# forwards. See docs/upstream_crates.md for the full inventory.
+candle-core = { version = "0.8", default-features = false }
+candle-transformers = { version = "0.8", default-features = false }
+candle-nn = { version = "0.8", default-features = false }
+# GGML quants used via candle's gguf reader (already a candle-core
+# dep transitively; pinning here for clarity).
+half = "2"

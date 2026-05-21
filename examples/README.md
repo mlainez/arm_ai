@@ -32,7 +32,7 @@ build it into your own Nerves app and call from your supervisor.
 | 01 | Chatbot (TinyLlama Q4_K_M) | GGUF, 638 MB | `["chatbot"]` | ✅ 4.63 tok/s |
 | 02 | Voice transcription (Whisper) | GGUF + tokenizer, 75 MB | `["whisper"]` | bridge wired, mel-filter URL placeholder |
 | 03 | Semantic search / RAG | ONNX sentence encoder, 90 MB | `["sentence-rag"]` | ✅ 676 µs/query |
-| 04 | Object detection (YOLO) | ONNX, 4–14 MB | `["yolo"]` | bridge wired; tract `Upsample` gap on yolov8 — see README |
+| 04 | Object detection (YOLO) | ONNX, 4–14 MB | `["yolo"]` | ✅ load + forward pass on FP3 (after opset-10 bump — `export_to_tract_opset.py`) |
 | 05 | Voice activity detection (Silero VAD) | ONNX, 1.8 MB | `["onnx", "audio"]` | bridge wired |
 | 06 | Text-to-speech (Piper) | ONNX, 25 MB | `["piper-tts"]` | bridge wired, needs real phoneme_id_map |
 | 07 | Image classification (Bumblebee/Axon ViT) | Bumblebee fetches | `["full"]` | ✅ ~3 s warm (separately) |

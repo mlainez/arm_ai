@@ -436,6 +436,30 @@ defmodule NxArm.Native do
   def stack_axis0_op(_tensors, _tensor_bytes),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @spec sort_axis_f32_op(binary(), pos_integer(), pos_integer(), boolean()) :: binary()
+  def sort_axis_f32_op(_input, _outer, _inner, _descending),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec argsort_axis_f32_op(binary(), pos_integer(), pos_integer(), boolean()) :: binary()
+  def argsort_axis_f32_op(_input, _outer, _inner, _descending),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec reduce_all_u8_op(binary()) :: 0 | 1
+  def reduce_all_u8_op(_input),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec reduce_any_u8_op(binary()) :: 0 | 1
+  def reduce_any_u8_op(_input),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec reduce_product_f32_op(binary()) :: float()
+  def reduce_product_f32_op(_input),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec reverse_op(binary(), [non_neg_integer()], [non_neg_integer()], pos_integer()) :: binary()
+  def reverse_op(_input, _shape, _axes, _elem_size),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   @doc """
   Quantize an `(N, K)` f32 weight matrix to Q4_0 packed int4 +
   scales. K must be a multiple of 32. Returns `{packed_bin,

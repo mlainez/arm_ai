@@ -722,7 +722,18 @@ defmodule NxArm.Backend do
   end
 
   @impl true
-  def reverse(out, tensor, axes), do: fallback(:reverse, [out, tensor, axes])
+  def reverse(out, tensor, axes) do
+    try do
+      shape = Nx.shape(tensor) |> Tuple.to_list()
+      esize = element_size(Nx.type(tensor))
+      out_bin = NxArm.Native.reverse_op(bin_of(tensor), shape, axes, esize)
+      put_in(out.data, %__MODULE__{bin: out_bin})
+    rescue
+      _ -> fallback(:reverse, [out, tensor, axes])
+    catch
+      :error, _ -> fallback(:reverse, [out, tensor, axes])
+    end
+  end
 
   @impl true
   def clip(out, tensor, min, max) do
@@ -877,13 +888,82 @@ defmodule NxArm.Backend do
   end
 
   @impl true
-  def all(out, tensor, opts), do: fallback(:all, [out, tensor, opts])
+  def all(out, tensor, opts) do
+    # Only handle the "reduce-everything → scalar" path on u8. Axis-
+    # restricted reductions stay on fallback for now.
+    if opts == [] or opts[:axes] in [nil, []] do
+      try do
+        type = Nx.type(tensor)
+
+        bin =
+          if type == {:u, 8} do
+            bin_of(tensor)
+          else
+            NxArm.Native.as_type_op(
+              bin_of(tensor),
+              dtype_code(type),
+              dtype_code({:u, 8}),
+              Nx.size(tensor)
+            )
+          end
+
+        val = NxArm.Native.reduce_all_u8_op(bin)
+        put_in(out.data, %__MODULE__{bin: <<val::8>>})
+      rescue
+        _ -> fallback(:all, [out, tensor, opts])
+      catch
+        :error, _ -> fallback(:all, [out, tensor, opts])
+      end
+    else
+      fallback(:all, [out, tensor, opts])
+    end
+  end
 
   @impl true
-  def any(out, tensor, opts), do: fallback(:any, [out, tensor, opts])
+  def any(out, tensor, opts) do
+    if opts == [] or opts[:axes] in [nil, []] do
+      try do
+        type = Nx.type(tensor)
+
+        bin =
+          if type == {:u, 8} do
+            bin_of(tensor)
+          else
+            NxArm.Native.as_type_op(
+              bin_of(tensor),
+              dtype_code(type),
+              dtype_code({:u, 8}),
+              Nx.size(tensor)
+            )
+          end
+
+        val = NxArm.Native.reduce_any_u8_op(bin)
+        put_in(out.data, %__MODULE__{bin: <<val::8>>})
+      rescue
+        _ -> fallback(:any, [out, tensor, opts])
+      catch
+        :error, _ -> fallback(:any, [out, tensor, opts])
+      end
+    else
+      fallback(:any, [out, tensor, opts])
+    end
+  end
 
   @impl true
-  def product(out, tensor, opts), do: fallback(:product, [out, tensor, opts])
+  def product(out, tensor, opts) do
+    if (opts == [] or opts[:axes] in [nil, []]) and Nx.type(tensor) == {:f, 32} do
+      try do
+        val = NxArm.Native.reduce_product_f32_op(bin_of(tensor))
+        put_in(out.data, %__MODULE__{bin: <<val::float-32-little>>})
+      rescue
+        _ -> fallback(:product, [out, tensor, opts])
+      catch
+        :error, _ -> fallback(:product, [out, tensor, opts])
+      end
+    else
+      fallback(:product, [out, tensor, opts])
+    end
+  end
 
   @impl true
   def argmax(out, tensor, opts), do: do_argmax_argmin(out, tensor, opts, :max)
@@ -977,10 +1057,51 @@ defmodule NxArm.Backend do
   end
 
   @impl true
-  def sort(out, tensor, opts), do: fallback(:sort, [out, tensor, opts])
+  def sort(out, tensor, opts), do: do_sort_argsort(out, tensor, opts, :sort)
 
   @impl true
-  def argsort(out, tensor, opts), do: fallback(:argsort, [out, tensor, opts])
+  def argsort(out, tensor, opts), do: do_sort_argsort(out, tensor, opts, :argsort)
+
+  defp do_sort_argsort(out, tensor, opts, which) do
+    type = Nx.type(tensor)
+    shape = Nx.shape(tensor) |> Tuple.to_list()
+    rank = length(shape)
+    axis = Keyword.get(opts, :axis, rank - 1)
+    direction = Keyword.get(opts, :direction, :asc)
+    descending = direction == :desc
+
+    cond do
+      type != {:f, 32} ->
+        fallback_name = if which == :sort, do: :sort, else: :argsort
+        fallback(fallback_name, [out, tensor, opts])
+
+      not (axis == rank - 1 or axis == -1) ->
+        fallback_name = if which == :sort, do: :sort, else: :argsort
+        fallback(fallback_name, [out, tensor, opts])
+
+      true ->
+        inner = if rank == 0, do: 1, else: List.last(shape)
+        outer = if rank == 0, do: 1, else: div(Nx.size(tensor), inner)
+
+        try do
+          out_bin =
+            case which do
+              :sort -> NxArm.Native.sort_axis_f32_op(bin_of(tensor), outer, inner, descending)
+              :argsort -> NxArm.Native.argsort_axis_f32_op(bin_of(tensor), outer, inner, descending)
+            end
+
+          put_in(out.data, %__MODULE__{bin: out_bin})
+        rescue
+          _ ->
+            fallback_name = if which == :sort, do: :sort, else: :argsort
+            fallback(fallback_name, [out, tensor, opts])
+        catch
+          :error, _ ->
+            fallback_name = if which == :sort, do: :sort, else: :argsort
+            fallback(fallback_name, [out, tensor, opts])
+        end
+    end
+  end
 
   @impl true
   def window_scatter_max(out, tensor, source, init, shape, opts),

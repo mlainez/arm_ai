@@ -1381,6 +1381,70 @@ fn stack_axis0_op<'a>(
     Ok(out_bin.release(env))
 }
 
+#[rustler::nif]
+fn sort_axis_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    outer: usize,
+    inner: usize,
+    descending: bool,
+) -> NifResult<rustler::Binary<'a>> {
+    let mut out_bin = OwnedBinary::new(outer * inner * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::sort_axis_f32(input.as_slice(), out_bin.as_mut_slice(), outer, inner, descending);
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn argsort_axis_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    outer: usize,
+    inner: usize,
+    descending: bool,
+) -> NifResult<rustler::Binary<'a>> {
+    let mut out_bin = OwnedBinary::new(outer * inner * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::argsort_axis_f32(input.as_slice(), out_bin.as_mut_slice(), outer, inner, descending);
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn reduce_all_u8_op(input: rustler::Binary) -> u8 {
+    ops::reduce_all_u8(input.as_slice())
+}
+
+#[rustler::nif]
+fn reduce_any_u8_op(input: rustler::Binary) -> u8 {
+    ops::reduce_any_u8(input.as_slice())
+}
+
+#[rustler::nif]
+fn reduce_product_f32_op(input: rustler::Binary) -> f32 {
+    ops::reduce_product_f32(input.as_slice())
+}
+
+#[rustler::nif]
+fn reverse_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    shape: Vec<usize>,
+    axes: Vec<usize>,
+    elem_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let n: usize = shape.iter().product();
+    let mut out_bin = OwnedBinary::new(n * elem_size)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::reverse_axes(
+        input.as_slice(),
+        out_bin.as_mut_slice(),
+        &shape,
+        &axes,
+        elem_size,
+    );
+    Ok(out_bin.release(env))
+}
+
 fn load(env: Env, _info: rustler::Term) -> bool {
     rustler::resource!(MmapResource, env);
     true

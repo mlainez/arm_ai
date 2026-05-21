@@ -371,3 +371,126 @@ pub fn stack_axis0(tensors: &[&[u8]], out: &mut [u8], tensor_bytes: usize) {
         out[dst_off..dst_off + tensor_bytes].copy_from_slice(&t[..tensor_bytes]);
     }
 }
+
+// ---------------------------------------------------------------
+// sort + argsort along the last axis. Stable sort via Rust's std.
+// Directions: 0 = ascending, 1 = descending.
+//
+// The common LLM use is `Nx.argsort(logits, direction: :desc)` for
+// top-k sampling; the CV use is sort + slice for NMS.
+// ---------------------------------------------------------------
+
+pub fn sort_axis_f32(input: &[u8], out: &mut [u8], outer: usize, inner: usize, descending: bool) {
+    let src = as_slice::<f32>(input);
+    let dst = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut f32, outer * inner)
+    };
+
+    dst.par_chunks_mut(inner).enumerate().for_each(|(o, row)| {
+        let src_row = &src[o * inner..(o + 1) * inner];
+        row.copy_from_slice(src_row);
+        if descending {
+            row.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            row.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        }
+    });
+}
+
+pub fn argsort_axis_f32(input: &[u8], out: &mut [u8], outer: usize, inner: usize, descending: bool) {
+    let src = as_slice::<f32>(input);
+    let dst = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut i32, outer * inner)
+    };
+
+    dst.par_chunks_mut(inner).enumerate().for_each(|(o, row)| {
+        let src_row = &src[o * inner..(o + 1) * inner];
+        let mut idx: Vec<u32> = (0..inner as u32).collect();
+        if descending {
+            idx.sort_by(|&a, &b| {
+                src_row[b as usize]
+                    .partial_cmp(&src_row[a as usize])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            idx.sort_by(|&a, &b| {
+                src_row[a as usize]
+                    .partial_cmp(&src_row[b as usize])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        for (i, &v) in idx.iter().enumerate() {
+            row[i] = v as i32;
+        }
+    });
+}
+
+// ---------------------------------------------------------------
+// Bool reductions: all / any / product / sum over a u8-boolean
+// tensor (Nx represents booleans as u8 elements 0 or 1).
+//
+// `all` returns 1 iff every element is non-zero.
+// `any` returns 1 iff any element is non-zero.
+// Result type matches Nx convention: u8 for all/any, f32 for product.
+// ---------------------------------------------------------------
+
+pub fn reduce_all_u8(input: &[u8]) -> u8 {
+    if input.iter().all(|&v| v != 0) { 1 } else { 0 }
+}
+
+pub fn reduce_any_u8(input: &[u8]) -> u8 {
+    if input.iter().any(|&v| v != 0) { 1 } else { 0 }
+}
+
+pub fn reduce_product_f32(input: &[u8]) -> f32 {
+    let src = as_slice::<f32>(input);
+    src.iter().copied().product()
+}
+
+// ---------------------------------------------------------------
+// reverse along arbitrary axes. We reverse one axis at a time;
+// most callers reverse a single axis (image flip, sequence
+// reversal), and the multi-axis case is rare enough that the per-
+// pass copy is fine.
+// ---------------------------------------------------------------
+
+pub fn reverse_axes(
+    input: &[u8],
+    out: &mut [u8],
+    shape: &[usize],
+    axes: &[usize],
+    elem_size: usize,
+) {
+    let rank = shape.len();
+    let n: usize = shape.iter().product();
+
+    // Pre-compute per-axis stride in elements.
+    let strides: Vec<usize> = {
+        let mut s = vec![1usize; rank];
+        for i in (0..rank.saturating_sub(1)).rev() {
+            s[i] = s[i + 1] * shape[i + 1];
+        }
+        s
+    };
+
+    let reverse_set: std::collections::HashSet<usize> = axes.iter().copied().collect();
+
+    for flat in 0..n {
+        let mut rem = flat;
+        let mut out_flat = 0usize;
+        for axis in 0..rank {
+            let idx = rem / strides[axis];
+            rem %= strides[axis];
+            let mapped = if reverse_set.contains(&axis) {
+                shape[axis] - 1 - idx
+            } else {
+                idx
+            };
+            out_flat += mapped * strides[axis];
+        }
+        let src_off = flat * elem_size;
+        let dst_off = out_flat * elem_size;
+        out[dst_off..dst_off + elem_size]
+            .copy_from_slice(&input[src_off..src_off + elem_size]);
+    }
+}

@@ -3474,6 +3474,69 @@ pub fn reduce_axis_f32(op: &str, input: &[f32], n_outer: usize, inner: usize) ->
 // but the loop handles general M.
 // ---------------------------------------------------------------
 
+/// Numerically-stable softmax along the last axis, in one NIF call.
+/// Standard 5-call Elixir chain (reduce_max → subtract → exp → sum →
+/// divide) costs ~5× the BEAM dispatch overhead; fusing them
+/// removes 4 of those round-trips for every softmax in the decoder.
+///
+/// `input` and `out` are flat `outer * inner` f32 buffers. Each row
+/// of `inner` floats is processed independently and emerges as a
+/// proper probability distribution summing to 1.
+pub fn softmax_last_axis_f32(input: &[f32], out: &mut [f32], outer: usize, inner: usize) {
+    use rayon::prelude::*;
+    debug_assert_eq!(input.len(), outer * inner);
+    debug_assert_eq!(out.len(), outer * inner);
+
+    out.par_chunks_mut(inner).enumerate().for_each(|(o, row)| {
+        let src = &input[o * inner..(o + 1) * inner];
+
+        // 1. max for numerical stability.
+        let mut max = src[0];
+        for &v in src.iter().skip(1) {
+            if v > max {
+                max = v;
+            }
+        }
+
+        // 2. exp(x - max) and accumulate the sum in one pass.
+        let mut sum = 0.0f32;
+        for i in 0..inner {
+            let e = (src[i] - max).exp();
+            row[i] = e;
+            sum += e;
+        }
+
+        // 3. normalise. Multiply by reciprocal to avoid per-element
+        // divide.
+        let inv = 1.0 / sum;
+        for i in 0..inner {
+            row[i] *= inv;
+        }
+    });
+}
+
+/// Fused decoder FFN tail: `out = silu(gate) * up`.
+/// `silu(x) = x * sigmoid(x) = x / (1 + exp(-x))`.
+/// Replaces sigmoid + multiply + multiply (3 NIFs) with one pass.
+pub fn silu_gate_mul_up_f32(gate: &[f32], up: &[f32], out: &mut [f32]) {
+    use rayon::prelude::*;
+    debug_assert_eq!(gate.len(), up.len());
+    debug_assert_eq!(out.len(), gate.len());
+
+    let n = gate.len();
+    let chunk = ((n + rayon::current_num_threads() - 1) / rayon::current_num_threads()).max(64);
+
+    out.par_chunks_mut(chunk).enumerate().for_each(|(ci, o_chunk)| {
+        let start = ci * chunk;
+        for (i, slot) in o_chunk.iter_mut().enumerate() {
+            let g = gate[start + i];
+            let u = up[start + i];
+            let sig_g = 1.0 / (1.0 + (-g).exp());
+            *slot = g * sig_g * u;
+        }
+    });
+}
+
 /// Dequantize a GGML Q6_K tensor to f32 in place.
 ///
 /// Block layout (one super-block = 256 weights, 210 bytes):

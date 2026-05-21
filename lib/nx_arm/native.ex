@@ -376,6 +376,24 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Fused softmax along the last axis. Replaces the 5-NIF Elixir
+  chain (reduce_max + subtract + exp + sum + divide) with one
+  fused pass. Input layout: `outer * inner` f32 LE.
+  """
+  @spec softmax_last_axis_f32_op(binary(), pos_integer(), pos_integer()) :: binary()
+  def softmax_last_axis_f32_op(_input, _outer, _inner),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Fused `silu(gate) * up` (SwiGLU FFN inner). Replaces sigmoid +
+  multiply + multiply (3 NIFs) with one pass. Both inputs same
+  length, returned tensor same length.
+  """
+  @spec silu_gate_mul_up_f32_op(binary(), binary()) :: binary()
+  def silu_gate_mul_up_f32_op(_gate, _up),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Int8 matmul with per-token activation scales. `act_scales` is a
   length-M f32 LE binary -- one scale per row of A. Equivalent to
   `int8_matmul_f32_op` but with per-row dequant, recovering accuracy

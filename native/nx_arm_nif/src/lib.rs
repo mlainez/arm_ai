@@ -276,6 +276,50 @@ fn quantize_int8_per_token_op<'a>(
     Ok((q_bin.release(env), s_bin.release(env)))
 }
 
+/// Fused softmax along the last axis. Replaces a 5-call Elixir
+/// chain in the attention path with one NIF.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn softmax_last_axis_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    outer: usize,
+    inner: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let src: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, outer * inner)
+    };
+    let mut out_bin = OwnedBinary::new(outer * inner * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let dst: &mut [f32] = unsafe {
+        std::slice::from_raw_parts_mut(out_bin.as_mut_slice().as_mut_ptr() as *mut f32, outer * inner)
+    };
+    shape_ops::softmax_last_axis_f32(src, dst, outer, inner);
+    Ok(out_bin.release(env))
+}
+
+/// Fused `silu(gate) * up` for the SwiGLU FFN. Replaces sigmoid +
+/// multiply + multiply (3 NIFs) with one fused pass.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn silu_gate_mul_up_f32_op<'a>(
+    env: Env<'a>,
+    gate: rustler::Binary<'a>,
+    up: rustler::Binary<'a>,
+) -> NifResult<rustler::Binary<'a>> {
+    let g: &[f32] = unsafe {
+        std::slice::from_raw_parts(gate.as_ptr() as *const f32, gate.as_slice().len() / 4)
+    };
+    let u: &[f32] = unsafe {
+        std::slice::from_raw_parts(up.as_ptr() as *const f32, up.as_slice().len() / 4)
+    };
+    let mut out_bin = OwnedBinary::new(g.len() * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let dst: &mut [f32] = unsafe {
+        std::slice::from_raw_parts_mut(out_bin.as_mut_slice().as_mut_ptr() as *mut f32, g.len())
+    };
+    shape_ops::silu_gate_mul_up_f32(g, u, dst);
+    Ok(out_bin.release(env))
+}
+
 /// Dequantize a GGML Q6_K blob into a fresh f32 binary. Used to
 /// materialise LM head weights at model load time since Q6_K
 /// kernels aren't yet implemented inline.

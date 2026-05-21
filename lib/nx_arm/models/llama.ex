@@ -380,16 +380,12 @@ defmodule NxArm.Models.Llama do
       end
 
     # Batched attention: one Nx.dot for Q@K^T across all heads.
-    # Q: {nh, seq, hd}, K_expanded: {nh, view_length, hd}.
-    # Result: {nh, seq, view_length}.
     scale = 1.0 / :math.sqrt(hd * 1.0)
     scores = Nx.dot(q_roped, [2], [0], k_expanded, [2], [0]) |> Nx.multiply(scale)
     scores_masked = apply_causal_mask_batched(scores, seq, view_length, start_pos, nh)
 
-    m = Nx.reduce_max(scores_masked, axes: [-1], keep_axes: true)
-    e = Nx.exp(Nx.subtract(scores_masked, m))
-    s = Nx.sum(e, axes: [-1], keep_axes: true)
-    attn = Nx.divide(e, s)
+    # Fused softmax. {nh, seq, view_length} → outer = nh * seq.
+    attn = fused_softmax(scores_masked, nh * seq, view_length)
 
     # attn: {nh, seq, view_length}, V_expanded: {nh, view_length, hd}.
     # Result: {nh, seq, hd} → flatten heads → {seq, d}.
@@ -404,8 +400,7 @@ defmodule NxArm.Models.Llama do
     x1_norm = rmsnorm(x1, layer.ffn_norm, model.config.rms_eps)
     gate = matmul_quant_rows(x1_norm, layer.w_gate, model.config.ff_dim, seq)
     up = matmul_quant_rows(x1_norm, layer.w_up, model.config.ff_dim, seq)
-    silu = Nx.multiply(gate, Nx.sigmoid(gate))
-    fused = Nx.multiply(silu, up)
+    fused = fused_silu_mul(gate, up)
     down = matmul_quant_rows(fused, layer.w_down, d, seq)
 
     x_out = Nx.add(x1, down)
@@ -450,6 +445,21 @@ defmodule NxArm.Models.Llama do
 
   defp rmsnorm(x, {:f32, gamma}, eps) do
     NxArm.LLM.rmsnorm(x, gamma, eps)
+  end
+
+  defp fused_softmax(t, outer, inner) do
+    shape = Nx.shape(t)
+    bin = NxArm.Backend.__bin_of__(t)
+    out_bin = NxArm.Native.softmax_last_axis_f32_op(bin, outer, inner)
+    %{t | data: %NxArm.Backend{bin: out_bin}, shape: shape, type: {:f, 32}}
+  end
+
+  defp fused_silu_mul(gate, up) do
+    shape = Nx.shape(gate)
+    g_bin = NxArm.Backend.__bin_of__(gate)
+    u_bin = NxArm.Backend.__bin_of__(up)
+    out_bin = NxArm.Native.silu_gate_mul_up_f32_op(g_bin, u_bin)
+    %{gate | data: %NxArm.Backend{bin: out_bin}, shape: shape, type: {:f, 32}}
   end
 
   # ----------------------------------------------------------------

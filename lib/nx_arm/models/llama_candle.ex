@@ -18,18 +18,44 @@ defmodule NxArm.Models.LlamaCandle do
       )
   """
 
-  defstruct [:handle]
+  defstruct [:handle, :tokenizer]
 
-  @doc "Load a GGUF Llama-family model via candle."
-  @spec load(Path.t()) :: {:ok, %__MODULE__{}} | {:error, term()}
-  def load(path) do
+  @doc """
+  Load a GGUF Llama-family model via candle. Optionally also load a
+  `tokenizer.json` so `generate/2` can take string prompts.
+
+      {:ok, model} = NxArm.Models.LlamaCandle.load("/root/tinyllama.gguf",
+                       tokenizer: "/root/tinyllama-tokenizer.json")
+
+  Requires the `llm` Cargo feature (default-on). If the binary was
+  built with `features: []` you'll get `{:error, :llm_feature_disabled}`.
+  """
+  @spec load(Path.t(), keyword()) :: {:ok, %__MODULE__{}} | {:error, term()}
+  def load(path, opts \\ []) do
+    if not function_exported?(NxArm.Native, :llama_candle_load_op, 1) do
+      {:error, :llm_feature_disabled}
+    else
     try do
       handle = NxArm.Native.llama_candle_load_op(path)
-      {:ok, %__MODULE__{handle: handle}}
+
+      tokenizer =
+        case Keyword.get(opts, :tokenizer) do
+          nil ->
+            nil
+
+          tok_path ->
+            case NxArm.Tokenizer.load(tok_path) do
+              {:ok, tok} -> tok
+              {:error, _} -> nil
+            end
+        end
+
+      {:ok, %__MODULE__{handle: handle, tokenizer: tokenizer}}
     rescue
       e -> {:error, e}
     catch
       :error, reason -> {:error, reason}
+    end
     end
   end
 
@@ -42,9 +68,26 @@ defmodule NxArm.Models.LlamaCandle do
   CPU governor flips to `performance` for the burst and restores
   on exit (default; pass `performance_governor: false` to disable).
   """
-  @spec generate(%__MODULE__{}, keyword()) :: {[non_neg_integer()], map()}
-  def generate(%__MODULE__{handle: handle}, opts) do
-    prompt = Keyword.fetch!(opts, :prompt_tokens)
+  @spec generate(%__MODULE__{}, keyword()) :: {[non_neg_integer()] | String.t(), map()}
+  def generate(%__MODULE__{handle: handle, tokenizer: tokenizer} = model, opts) do
+    {prompt, return_string?} =
+      cond do
+        text = Keyword.get(opts, :prompt) ->
+          if tokenizer == nil do
+            raise ArgumentError,
+                  "load/2 with `tokenizer:` path to use string :prompt — got plain text but no tokenizer"
+          end
+
+          {NxArm.Tokenizer.encode(tokenizer, text), true}
+
+        prompt = Keyword.get(opts, :prompt_tokens) ->
+          {prompt, false}
+
+        true ->
+          raise ArgumentError, "pass :prompt (string) or :prompt_tokens (list)"
+      end
+
+    _ = model
     max_new = Keyword.get(opts, :max_new, 16)
     scope_governor? = Keyword.get(opts, :performance_governor, true)
 
@@ -66,7 +109,14 @@ defmodule NxArm.Models.LlamaCandle do
         cpu_temp_c: NxArm.Performance.max_cpu_temp_c()
       }
 
-      {all, stats}
+      result =
+        if return_string? do
+          NxArm.Tokenizer.decode(tokenizer, all)
+        else
+          all
+        end
+
+      {result, stats}
     end
 
     if scope_governor? do

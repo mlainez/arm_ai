@@ -1105,9 +1105,10 @@ pub fn rope_f32(
 
 /// Bilinear image resize for HWC uint8 inputs. Common entry point
 /// for vision-model preprocessing: camera/JPEG decode produces a
-/// HxWx3 u8 buffer; the model wants its own resolution. Pure
-/// bilinear interpolation, written as a per-output-pixel gather of
-/// the 4 surrounding source pixels.
+/// HWC u8 image resize via `fast_image_resize` — SIMD-accelerated
+/// (NEON on aarch64, AVX2/SSE on x86_64). Standard bilinear filter;
+/// the crate also exposes Lanczos, Catmull-Rom, etc. if we want them
+/// later.
 pub fn bilinear_resize_u8(
     input: &[u8],
     in_h: usize,
@@ -1116,6 +1117,8 @@ pub fn bilinear_resize_u8(
     out_h: usize,
     out_w: usize,
 ) -> Result<Vec<u8>, String> {
+    use fast_image_resize as fir;
+
     if input.len() != in_h * in_w * channels {
         return Err(format!(
             "bilinear_resize: input len {} != H*W*C = {}",
@@ -1127,43 +1130,32 @@ pub fn bilinear_resize_u8(
         return Err("bilinear_resize: zero dimension".into());
     }
 
-    let mut out = vec![0u8; out_h * out_w * channels];
+    let pixel_type = match channels {
+        1 => fir::PixelType::U8,
+        3 => fir::PixelType::U8x3,
+        4 => fir::PixelType::U8x4,
+        n => return Err(format!("bilinear_resize: unsupported channel count {}", n)),
+    };
 
-    let h_scale = (in_h as f32 - 1.0) / (out_h as f32 - 1.0).max(1.0);
-    let w_scale = (in_w as f32 - 1.0) / (out_w as f32 - 1.0).max(1.0);
+    let src_image = fir::images::Image::from_vec_u8(
+        in_w as u32,
+        in_h as u32,
+        input.to_vec(),
+        pixel_type,
+    )
+    .map_err(|e| format!("fir::Image::from_vec_u8: {}", e))?;
 
-    use rayon::prelude::*;
-    out.par_chunks_mut(out_w * channels)
-        .enumerate()
-        .for_each(|(oy, row)| {
-            let in_y = oy as f32 * h_scale;
-            let y0 = in_y.floor() as usize;
-            let y1 = (y0 + 1).min(in_h - 1);
-            let dy = in_y - y0 as f32;
+    let mut dst_image = fir::images::Image::new(out_w as u32, out_h as u32, pixel_type);
 
-            for ox in 0..out_w {
-                let in_x = ox as f32 * w_scale;
-                let x0 = in_x.floor() as usize;
-                let x1 = (x0 + 1).min(in_w - 1);
-                let dx = in_x - x0 as f32;
+    let mut resizer = fir::Resizer::new();
+    let opts = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear));
 
-                for c in 0..channels {
-                    let p00 = input[(y0 * in_w + x0) * channels + c] as f32;
-                    let p01 = input[(y0 * in_w + x1) * channels + c] as f32;
-                    let p10 = input[(y1 * in_w + x0) * channels + c] as f32;
-                    let p11 = input[(y1 * in_w + x1) * channels + c] as f32;
+    resizer
+        .resize(&src_image, &mut dst_image, &opts)
+        .map_err(|e| format!("fir::Resizer::resize: {}", e))?;
 
-                    let interp = p00 * (1.0 - dx) * (1.0 - dy)
-                        + p01 * dx * (1.0 - dy)
-                        + p10 * (1.0 - dx) * dy
-                        + p11 * dx * dy;
-
-                    row[ox * channels + c] = interp.round() as u8;
-                }
-            }
-        });
-
-    Ok(out)
+    Ok(dst_image.into_vec())
 }
 
 /// Full-int8 matmul. Activations and weights both int8; output f32.
@@ -1500,75 +1492,22 @@ pub fn dequant_matmul_f16_f32(
     Ok(out)
 }
 
-/// Scalar f16→f32 conversion. IEEE 754 half precision: 1 sign + 5
-/// exponent + 10 mantissa. Used in the scalar tail of the NEON path
-/// and on non-aarch64 fallbacks.
+/// f16↔f32 via the `half` crate (IEEE 754 binary16 with proper
+/// round-to-nearest-even, NaN/Inf preservation, subnormal handling).
+/// Drops ~70 LOC of manual bit-twiddling that used to live here.
+#[inline]
 fn f16_to_f32(u: u16) -> f32 {
-    let sign = ((u >> 15) & 1) as u32;
-    let exp = ((u >> 10) & 0x1f) as u32;
-    let mant = (u & 0x3ff) as u32;
+    half::f16::from_bits(u).to_f32()
+}
 
-    let f32_bits = if exp == 0 {
-        if mant == 0 {
-            sign << 31
-        } else {
-            // Subnormal: normalise.
-            let mut e = 1u32;
-            let mut m = mant;
-            while m & 0x400 == 0 {
-                m <<= 1;
-                e += 1;
-            }
-            let new_exp = 127 - 15 - e + 1;
-            (sign << 31) | (new_exp << 23) | ((m & 0x3ff) << 13)
-        }
-    } else if exp == 0x1f {
-        // Infinity / NaN.
-        (sign << 31) | (0xffu32 << 23) | (mant << 13)
-    } else {
-        let new_exp = exp + (127 - 15);
-        (sign << 31) | (new_exp << 23) | (mant << 13)
-    };
-
-    f32::from_bits(f32_bits)
+#[inline]
+fn f32_to_f16(v: f32) -> u16 {
+    half::f16::from_f32(v).to_bits()
 }
 
 /// Quantize an f32 array to fp16 by IEEE 754 round-to-nearest-even.
 pub fn f32_to_f16_array(f32s: &[f32]) -> Vec<u16> {
     f32s.iter().map(|&v| f32_to_f16(v)).collect()
-}
-
-fn f32_to_f16(v: f32) -> u16 {
-    let bits = v.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp_f32 = ((bits >> 23) & 0xff) as i32;
-    let mant = bits & 0x7fffff;
-
-    if exp_f32 == 0xff {
-        // Inf / NaN.
-        sign | 0x7c00 | (if mant != 0 { 1 } else { 0 } as u16)
-    } else if exp_f32 == 0 {
-        // f32 zero / subnormal → f16 zero.
-        sign
-    } else {
-        let exp_f16 = exp_f32 - (127 - 15);
-        if exp_f16 >= 0x1f {
-            // Overflow to inf.
-            sign | 0x7c00
-        } else if exp_f16 <= 0 {
-            // Underflow: round to f16 subnormal or zero.
-            sign
-        } else {
-            let mant_f16 = (mant >> 13) as u16;
-            // Round-to-nearest-even on the discarded bits.
-            let round = if (mant & 0x1fff) > 0x1000 || ((mant & 0x1fff) == 0x1000 && (mant_f16 & 1) == 1) {
-                1
-            } else {
-                0
-            };
-            sign | ((exp_f16 as u16) << 10) | (mant_f16.wrapping_add(round))
-        }
-    }
 }
 
 /// Weight-only int8 matmul: `act` f32 × `weights` int8, per-row
@@ -2957,29 +2896,9 @@ pub fn dequantize_q6_k(input: &[u8], out: &mut [f32]) {
     }
 }
 
+#[inline]
 fn f16_bits_to_f32(h: u16) -> f32 {
-    let s = ((h >> 15) & 0x1) as u32;
-    let e = ((h >> 10) & 0x1F) as u32;
-    let m = (h & 0x3FF) as u32;
-
-    if e == 0 {
-        if m == 0 {
-            if s == 1 { -0.0 } else { 0.0 }
-        } else {
-            // Subnormal.
-            let sign = if s == 1 { -1.0 } else { 1.0 };
-            sign * (2.0_f32).powi(-14) * (m as f32) / 1024.0
-        }
-    } else if e == 31 {
-        if m == 0 {
-            if s == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
-        } else {
-            f32::NAN
-        }
-    } else {
-        let sign = if s == 1 { -1.0 } else { 1.0 };
-        sign * (2.0_f32).powi(e as i32 - 15) * (1.0 + (m as f32) / 1024.0)
-    }
+    half::f16::from_bits(h).to_f32()
 }
 
 /// NEON Q4_0 × Q8_0 GEMV (M=1). The fastest kernel in this file

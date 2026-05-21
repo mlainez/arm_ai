@@ -13,22 +13,29 @@ rustler = "0.36"
 rayon = "1.10"
 memmap2 = "0.9"
 
-# Upstream ML / numeric stack. Per the "use the crate if it's
-# faster, smaller, or better-maintained" policy.
-candle-core = { version = "0.8", default-features = false }
-candle-transformers = { version = "0.8", default-features = false }
-candle-nn = { version = "0.8", default-features = false }
-# Production f32/f64 GEMM with NEON tuning. Drops our hand-rolled
-# matmul kernels (~700 LOC).
+# Core: small, always-on deps. ~1 MB of binary.
 gemm = "0.18"
-# IEEE 754 half-precision types. Drops our manual f16 bit-twiddling.
 half = "2"
-# SIMD image resize. Drops the bilinear resize NIF.
 fast_image_resize = "5"
-# Generic image I/O for vision pipelines.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-# SafeTensors reader. Drops lib/nx_arm/safetensors.ex.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 safetensors = "0.4"
-# HuggingFace tokenizers — fast BPE/WordPiece/SentencePiece. Lets
-# the LLM API take strings instead of token IDs.
-tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+
+# LLM inference. ~3 MB of binary on top.
+candle-core = { version = "0.8", default-features = false, optional = true }
+candle-transformers = { version = "0.8", default-features = false, optional = true }
+candle-nn = { version = "0.8", default-features = false, optional = true }
+
+# Tokenization. ~1 MB of binary on top. Required when llm is on.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+
+# Generic ONNX runtime in pure Rust with ARM NEON. ~20 MB of binary —
+# the heaviest crate in this stack. Only pulled in when `onnx` feature
+# is enabled.
+tract-onnx = { version = "0.21", default-features = false, optional = true }
+
+[features]
+default = ["llm", "onnx"]
+# All-rust LLM stack: candle + tokenizers.
+llm = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers"]
+# tract-onnx — the universal HuggingFace model path. Heavy.
+onnx = ["dep:tract-onnx"]

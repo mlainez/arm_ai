@@ -6,9 +6,14 @@
 // and dispatches each Nx callback to one of these.
 
 mod conv_int8;
+#[cfg(feature = "llm")]
 mod llama_candle;
+#[cfg(feature = "onnx")]
+mod onnx;
 mod ops;
 mod shape_ops;
+#[cfg(feature = "llm")]
+mod tokenizer;
 mod topology;
 
 use rustler::{Env, NifResult, OwnedBinary, ResourceArc};
@@ -1635,9 +1640,10 @@ fn reverse_op<'a>(
 }
 
 // ---------------------------------------------------------------
-// candle bridge for Llama-family models.
+// candle bridge for Llama-family models. Behind `llm` feature.
 // ---------------------------------------------------------------
 
+#[cfg(feature = "llm")]
 #[rustler::nif(schedule = "DirtyCpu")]
 fn llama_candle_load_op(path: String) -> NifResult<ResourceArc<llama_candle::LlamaResource>> {
     let res = llama_candle::load_model(&path)
@@ -1645,6 +1651,7 @@ fn llama_candle_load_op(path: String) -> NifResult<ResourceArc<llama_candle::Lla
     Ok(ResourceArc::new(res))
 }
 
+#[cfg(feature = "llm")]
 #[rustler::nif(schedule = "DirtyCpu")]
 fn llama_candle_generate_op(
     model: ResourceArc<llama_candle::LlamaResource>,
@@ -1656,9 +1663,108 @@ fn llama_candle_generate_op(
     Ok((result.tokens, result.prefill_us, result.decode_us))
 }
 
+// ---------------------------------------------------------------
+// Tokenizer bridge (HuggingFace `tokenizers` crate).
+// ---------------------------------------------------------------
+
+#[cfg(feature = "llm")]
+#[rustler::nif]
+fn tokenizer_load_op(path: String) -> NifResult<ResourceArc<tokenizer::TokenizerResource>> {
+    let res = tokenizer::load(&path)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("tokenizer load: {}", e))))?;
+    Ok(ResourceArc::new(res))
+}
+
+#[cfg(feature = "llm")]
+#[rustler::nif]
+fn tokenizer_encode_op(
+    res: ResourceArc<tokenizer::TokenizerResource>,
+    text: String,
+    add_special_tokens: bool,
+) -> NifResult<Vec<u32>> {
+    tokenizer::encode(&res, &text, add_special_tokens)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("tokenizer encode: {}", e))))
+}
+
+#[cfg(feature = "llm")]
+#[rustler::nif]
+fn tokenizer_decode_op(
+    res: ResourceArc<tokenizer::TokenizerResource>,
+    ids: Vec<u32>,
+    skip_special_tokens: bool,
+) -> NifResult<String> {
+    tokenizer::decode(&res, &ids, skip_special_tokens)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("tokenizer decode: {}", e))))
+}
+
+// ---------------------------------------------------------------
+// ONNX bridge (tract-onnx).
+// ---------------------------------------------------------------
+
+#[cfg(feature = "onnx")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn onnx_load_op(path: String) -> NifResult<(ResourceArc<onnx::OnnxModelResource>, Vec<String>, Vec<String>)> {
+    let res = onnx::load(&path)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("onnx load: {}", e))))?;
+    let input_names = res.input_names.clone();
+    let output_names = res.output_names.clone();
+    Ok((ResourceArc::new(res), input_names, output_names))
+}
+
+#[cfg(feature = "onnx")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn onnx_run_op<'a>(
+    env: Env<'a>,
+    model: ResourceArc<onnx::OnnxModelResource>,
+    inputs: Vec<(String, Vec<usize>, rustler::Binary<'a>)>,
+) -> NifResult<Vec<(String, Vec<usize>, rustler::Binary<'a>)>> {
+    use std::collections::HashMap;
+
+    let mut inputs_map: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+    for (name, shape, bin) in inputs {
+        let n_elems: usize = shape.iter().product();
+        let bytes = bin.as_slice();
+        if bytes.len() != n_elems * 4 {
+            return Err(rustler::Error::Term(Box::new(format!(
+                "onnx input '{}' size {} != {} * 4",
+                name,
+                bytes.len(),
+                n_elems
+            ))));
+        }
+        let f32_slice: &[f32] = unsafe {
+            std::slice::from_raw_parts(bytes.as_ptr() as *const f32, n_elems)
+        };
+        inputs_map.insert(name, (shape, f32_slice.to_vec()));
+    }
+
+    let result = onnx::run(&model, inputs_map)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("onnx run: {}", e))))?;
+
+    let mut out_terms = Vec::with_capacity(result.outputs.len());
+    for (name, shape, flat) in result.outputs {
+        let bytes = flat.len() * 4;
+        let mut bin = OwnedBinary::new(bytes)
+            .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+        let src: &[u8] = unsafe { std::slice::from_raw_parts(flat.as_ptr() as *const u8, bytes) };
+        bin.as_mut_slice().copy_from_slice(src);
+        out_terms.push((name, shape, bin.release(env)));
+    }
+
+    Ok(out_terms)
+}
+
 fn load(env: Env, _info: rustler::Term) -> bool {
     rustler::resource!(MmapResource, env);
-    rustler::resource!(llama_candle::LlamaResource, env);
+    #[cfg(feature = "llm")]
+    {
+        rustler::resource!(llama_candle::LlamaResource, env);
+        rustler::resource!(tokenizer::TokenizerResource, env);
+    }
+    #[cfg(feature = "onnx")]
+    {
+        rustler::resource!(onnx::OnnxModelResource, env);
+    }
     true
 }
 

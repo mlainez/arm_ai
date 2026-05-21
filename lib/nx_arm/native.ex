@@ -49,6 +49,14 @@ defmodule NxArm.Native do
     System.get_env("NX_ARM_BUILD") in ["1", "true"] or
       not File.exists?(Path.join([__DIR__, "..", "..", "checksum-Elixir.NxArm.Native.exs"]))
 
+  # Cargo features. `default` already enables `llm` + `onnx`; to slim
+  # the binary set `config :nx_arm, features: ["llm"]` or `[]`.
+  # Honoured by the local-build path (rustler_precompiled passes them
+  # straight to cargo); precompiled releases come with the default set.
+  cargo_features =
+    Application.compile_env(:nx_arm, :features, ["llm", "onnx"])
+    |> Enum.map(&to_string/1)
+
   use RustlerPrecompiled,
     otp_app: :nx_arm,
     crate: "nx_arm_nif",
@@ -66,8 +74,7 @@ defmodule NxArm.Native do
       "aarch64-apple-darwin"
     ],
     force_build: force_build?,
-    # Nerves cross-build path: when force_build is on and a cross
-    # target is set, forward that to cargo via the local-build path.
+    features: cargo_features,
     target: @rust_target,
     env: @linker_env
 
@@ -432,6 +439,38 @@ defmodule NxArm.Native do
           {[non_neg_integer()], non_neg_integer(), non_neg_integer()}
   def llama_candle_generate_op(_model, _prompt, _max_new),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  # --- Tokenizers (HuggingFace `tokenizers` crate) ---
+
+  @spec tokenizer_load_op(String.t()) :: reference()
+  def tokenizer_load_op(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec tokenizer_encode_op(reference(), String.t(), boolean()) :: [non_neg_integer()]
+  def tokenizer_encode_op(_handle, _text, _add_special),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec tokenizer_decode_op(reference(), [non_neg_integer()], boolean()) :: String.t()
+  def tokenizer_decode_op(_handle, _ids, _skip_special),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  # --- ONNX (tract-onnx) ---
+
+  @doc """
+  Load an ONNX model file. Returns `{model_handle, input_names,
+  output_names}`. Names match the ONNX graph (BERT inputs are
+  typically `input_ids`, `attention_mask`, etc.).
+  """
+  @spec onnx_load_op(String.t()) :: {reference(), [String.t()], [String.t()]}
+  def onnx_load_op(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Run an ONNX model. `inputs` is a list of `{name, shape, bin}`
+  where `bin` is f32-little binary of length `Enum.product(shape) * 4`.
+  Returns `[{name, shape, bin}]` for each output, all f32.
+  """
+  @spec onnx_run_op(reference(), [{String.t(), [non_neg_integer()], binary()}]) ::
+          [{String.t(), [non_neg_integer()], binary()}]
+  def onnx_run_op(_model, _inputs), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Int8 matmul with per-token activation scales. `act_scales` is a

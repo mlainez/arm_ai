@@ -8,6 +8,10 @@
 #[cfg(feature = "audio")]
 mod audio;
 mod conv_int8;
+#[cfg(feature = "fft")]
+mod fft;
+#[cfg(feature = "safetensors")]
+mod safetensors_load;
 #[cfg(feature = "vision")]
 mod vision;
 #[cfg(feature = "llm")]
@@ -1798,6 +1802,48 @@ fn cosine_similarity_f32_op<'a>(
 }
 
 #[rustler::nif]
+fn indexed_add_f32_op<'a>(
+    env: Env<'a>,
+    tensor: rustler::Binary<'a>,
+    indices: rustler::Binary<'a>,
+    updates: rustler::Binary<'a>,
+) -> NifResult<rustler::Binary<'a>> {
+    let t: &[f32] = unsafe {
+        std::slice::from_raw_parts(tensor.as_ptr() as *const f32, tensor.as_slice().len() / 4)
+    };
+    let idx: &[i64] = unsafe {
+        std::slice::from_raw_parts(indices.as_ptr() as *const i64, indices.as_slice().len() / 8)
+    };
+    let upd: &[f32] = unsafe {
+        std::slice::from_raw_parts(updates.as_ptr() as *const f32, updates.as_slice().len() / 4)
+    };
+    let out = ops::indexed_add_f32(t, idx, upd)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+#[rustler::nif]
+fn indexed_put_f32_op<'a>(
+    env: Env<'a>,
+    tensor: rustler::Binary<'a>,
+    indices: rustler::Binary<'a>,
+    updates: rustler::Binary<'a>,
+) -> NifResult<rustler::Binary<'a>> {
+    let t: &[f32] = unsafe {
+        std::slice::from_raw_parts(tensor.as_ptr() as *const f32, tensor.as_slice().len() / 4)
+    };
+    let idx: &[i64] = unsafe {
+        std::slice::from_raw_parts(indices.as_ptr() as *const i64, indices.as_slice().len() / 8)
+    };
+    let upd: &[f32] = unsafe {
+        std::slice::from_raw_parts(updates.as_ptr() as *const f32, updates.as_slice().len() / 4)
+    };
+    let out = ops::indexed_put_f32(t, idx, upd)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+#[rustler::nif]
 fn top_k_indices_f32_op(scores: rustler::Binary, k: usize) -> NifResult<Vec<i32>> {
     let s: &[f32] = unsafe {
         std::slice::from_raw_parts(scores.as_ptr() as *const f32, scores.as_slice().len() / 4)
@@ -1923,6 +1969,61 @@ fn audio_load_for_whisper_op<'a>(
     let samples = audio::decode_to_mono_at(&path, 16_000)
         .map_err(|e| rustler::Error::Term(Box::new(format!("audio for whisper: {}", e))))?;
     f32_vec_to_bin(env, &samples)
+}
+
+// ---------------------------------------------------------------
+// FFT / IFFT (rustfft, `fft` feature).
+// ---------------------------------------------------------------
+
+#[cfg(feature = "fft")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn fft_complex_op<'a>(env: Env<'a>, input: rustler::Binary<'a>) -> NifResult<rustler::Binary<'a>> {
+    let v: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, input.as_slice().len() / 4)
+    };
+    let out = fft::fft_complex(v).map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+#[cfg(feature = "fft")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ifft_complex_op<'a>(env: Env<'a>, input: rustler::Binary<'a>) -> NifResult<rustler::Binary<'a>> {
+    let v: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, input.as_slice().len() / 4)
+    };
+    let out = fft::ifft_complex(v).map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+#[cfg(feature = "fft")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn rfft_op<'a>(env: Env<'a>, input: rustler::Binary<'a>) -> NifResult<rustler::Binary<'a>> {
+    let v: &[f32] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const f32, input.as_slice().len() / 4)
+    };
+    let out = fft::rfft(v).map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    f32_vec_to_bin(env, &out)
+}
+
+// ---------------------------------------------------------------
+// SafeTensors loader (safetensors crate, `safetensors` feature).
+// ---------------------------------------------------------------
+
+#[cfg(feature = "safetensors")]
+#[rustler::nif(schedule = "DirtyIo")]
+fn safetensors_load_op<'a>(
+    env: Env<'a>,
+    path: String,
+) -> NifResult<Vec<(String, Vec<usize>, String, rustler::Binary<'a>)>> {
+    let tensors = safetensors_load::load_all(&path)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("safetensors: {}", e))))?;
+
+    let mut out = Vec::with_capacity(tensors.len());
+    for t in tensors {
+        let bin = f32_vec_to_bin(env, &t.data_f32)?;
+        out.push((t.name, t.shape, t.original_dtype.to_string(), bin));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------

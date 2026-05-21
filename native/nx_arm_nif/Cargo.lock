@@ -1340,6 +1340,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "rubato",
+ "rustfft",
  "rustler",
  "safetensors",
  "serde_json",

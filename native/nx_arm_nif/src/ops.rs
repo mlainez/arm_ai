@@ -419,6 +419,54 @@ pub fn cosine_similarity_f32(
         .expect("cosine_similarity dimensions checked above")
 }
 
+/// Scatter-add f32 updates into `tensor` at the given indices.
+/// `tensor` is flat-rank-1 here (after caller reshape). Mirrors
+/// `Nx.indexed_add/3` semantics: out-of-bounds indices wrap, repeated
+/// indices accumulate.
+pub fn indexed_add_f32(tensor: &[f32], indices: &[i64], updates: &[f32]) -> Result<Vec<f32>, String> {
+    if indices.len() != updates.len() {
+        return Err(format!(
+            "indexed_add: indices ({}) != updates ({})",
+            indices.len(),
+            updates.len()
+        ));
+    }
+    let n = tensor.len();
+    if n == 0 {
+        return Ok(tensor.to_vec());
+    }
+
+    let mut out = tensor.to_vec();
+    for (i, &idx) in indices.iter().enumerate() {
+        let pos = idx.rem_euclid(n as i64) as usize;
+        out[pos] += updates[i];
+    }
+    Ok(out)
+}
+
+/// Scatter-overwrite f32 updates into `tensor` at the given
+/// indices. Last write wins for repeated indices.
+pub fn indexed_put_f32(tensor: &[f32], indices: &[i64], updates: &[f32]) -> Result<Vec<f32>, String> {
+    if indices.len() != updates.len() {
+        return Err(format!(
+            "indexed_put: indices ({}) != updates ({})",
+            indices.len(),
+            updates.len()
+        ));
+    }
+    let n = tensor.len();
+    if n == 0 {
+        return Ok(tensor.to_vec());
+    }
+
+    let mut out = tensor.to_vec();
+    for (i, &idx) in indices.iter().enumerate() {
+        let pos = idx.rem_euclid(n as i64) as usize;
+        out[pos] = updates[i];
+    }
+    Ok(out)
+}
+
 /// Return the indices of the top `k` highest values in `scores`,
 /// ordered descending. O(n log k) via a min-heap.
 pub fn top_k_indices_f32(scores: &[f32], k: usize) -> Vec<i32> {

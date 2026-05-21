@@ -32,13 +32,14 @@ rubato              = { version = "0.16", default-features = false, optional = t
 image               = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 fast_image_resize   = { version = "5",                                                                  optional = true }
 safetensors         = { version = "0.4",                                                                optional = true }
+rustfft             = { version = "6",                                                                  optional = true }
 byteorder           = { version = "1",                                                                  optional = true }
 serde_json          = { version = "1",                                                                  optional = true }
 
 [features]
 # `full` is what most users want — every capability we ship.
 default = ["full"]
-full = ["llm", "tokenizers", "onnx", "audio", "vision", "whisper"]
+full = ["llm", "tokenizers", "onnx", "audio", "vision", "whisper", "safetensors", "fft"]
 
 # Atomic capabilities (declare what you actually use):
 llm        = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn"]
@@ -47,6 +48,8 @@ onnx       = ["dep:tract-onnx"]
 audio      = ["dep:symphonia", "dep:rubato"]
 vision     = ["dep:image", "dep:fast_image_resize"]
 safetensors = ["dep:safetensors"]
+# FFT / IFFT via rustfft. Pulls in ~200 KB; NEON-tuned for ARM.
+fft = ["dep:rustfft"]
 
 # Composite use-case presets (resolve to atomic features):
 whisper          = ["llm", "tokenizers", "audio", "dep:byteorder", "dep:serde_json"]

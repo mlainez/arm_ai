@@ -478,6 +478,32 @@ defmodule NxArm.Native do
   @spec top_k_indices_f32_op(binary(), pos_integer()) :: [non_neg_integer()]
   def top_k_indices_f32_op(_scores, _k), do: :erlang.nif_error(:nif_not_loaded)
 
+  # --- Scatter ops (indexed_add / indexed_put) ---
+
+  @spec indexed_add_f32_op(binary(), binary(), binary()) :: binary()
+  def indexed_add_f32_op(_tensor, _indices, _updates),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec indexed_put_f32_op(binary(), binary(), binary()) :: binary()
+  def indexed_put_f32_op(_tensor, _indices, _updates),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  # --- FFT (rustfft) ---
+
+  @spec fft_complex_op(binary()) :: binary()
+  def fft_complex_op(_input), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec ifft_complex_op(binary()) :: binary()
+  def ifft_complex_op(_input), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec rfft_op(binary()) :: binary()
+  def rfft_op(_input), do: :erlang.nif_error(:nif_not_loaded)
+
+  # --- SafeTensors ---
+
+  @spec safetensors_load_op(String.t()) :: [{String.t(), [non_neg_integer()], String.t(), binary()}]
+  def safetensors_load_op(_path), do: :erlang.nif_error(:nif_not_loaded)
+
   # --- Whisper (candle-transformers) ---
 
   @spec whisper_load_op(String.t(), String.t(), String.t(), String.t()) :: reference()

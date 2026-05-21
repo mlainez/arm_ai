@@ -1140,18 +1140,138 @@ defmodule NxArm.Backend do
     do: fallback(:window_scatter_min, [out, tensor, source, init, shape, opts])
 
   @impl true
-  def indexed_add(out, tensor, indices, updates, opts),
-    do: fallback(:indexed_add, [out, tensor, indices, updates, opts])
+  def indexed_add(out, tensor, indices, updates, opts) do
+    do_indexed(out, tensor, indices, updates, opts, :add)
+  end
 
   @impl true
-  def indexed_put(out, tensor, indices, updates, opts),
-    do: fallback(:indexed_put, [out, tensor, indices, updates, opts])
+  def indexed_put(out, tensor, indices, updates, opts) do
+    do_indexed(out, tensor, indices, updates, opts, :put)
+  end
+
+  defp do_indexed(out, tensor, indices, updates, opts, kind) do
+    type = Nx.type(tensor)
+
+    cond do
+      type != {:f, 32} ->
+        fb = if kind == :add, do: :indexed_add, else: :indexed_put
+        fallback(fb, [out, tensor, indices, updates, opts])
+
+      true ->
+        try do
+          t_bin = bin_of(tensor)
+          shape = Nx.shape(tensor) |> Tuple.to_list()
+          total = Enum.reduce(shape, 1, &(&1 * &2))
+          strides = compute_strides(shape)
+
+          # Convert N-D indices to flat indices.
+          flat_idx_bin = flatten_indices(indices, strides, total)
+          upd_bin = bin_of(updates) |> ensure_f32(Nx.type(updates), Nx.size(updates))
+
+          out_bin =
+            case kind do
+              :add -> NxArm.Native.indexed_add_f32_op(t_bin, flat_idx_bin, upd_bin)
+              :put -> NxArm.Native.indexed_put_f32_op(t_bin, flat_idx_bin, upd_bin)
+            end
+
+          put_in(out.data, %__MODULE__{bin: out_bin})
+        rescue
+          _ ->
+            fb = if kind == :add, do: :indexed_add, else: :indexed_put
+            fallback(fb, [out, tensor, indices, updates, opts])
+        catch
+          :error, _ ->
+            fb = if kind == :add, do: :indexed_add, else: :indexed_put
+            fallback(fb, [out, tensor, indices, updates, opts])
+        end
+    end
+  end
+
+  defp compute_strides([]), do: []
+
+  defp compute_strides(shape) do
+    Enum.reduce(Enum.reverse(shape), {[], 1}, fn dim, {acc, stride} ->
+      {[stride | acc], stride * dim}
+    end)
+    |> elem(0)
+  end
+
+  defp flatten_indices(indices, strides, total) do
+    rank = length(strides)
+    {n, _} = Nx.shape(indices)
+
+    raw =
+      indices
+      |> Nx.backend_copy(Nx.BinaryBackend)
+      |> Nx.to_flat_list()
+
+    flat =
+      raw
+      |> Enum.chunk_every(rank)
+      |> Enum.map(fn coords ->
+        flat =
+          Enum.zip(coords, strides)
+          |> Enum.reduce(0, fn {c, s}, acc -> acc + c * s end)
+
+        rem(flat, total)
+      end)
+
+    flat
+    |> Enum.map(&<<&1::little-signed-64>>)
+    |> IO.iodata_to_binary()
+    |> tap(fn _ -> n end)
+  end
+
+  defp ensure_f32(bin, {:f, 32}, _n), do: bin
+
+  defp ensure_f32(bin, type, n) do
+    NxArm.Native.as_type_op(bin, dtype_code(type), dtype_code({:f, 32}), n)
+  end
 
   @impl true
-  def fft(out, tensor, opts), do: fallback(:fft, [out, tensor, opts])
+  def fft(out, tensor, opts) do
+    cond do
+      not function_exported?(NxArm.Native, :fft_complex_op, 1) ->
+        fallback(:fft, [out, tensor, opts])
+
+      Nx.type(tensor) != {:c, 64} ->
+        fallback(:fft, [out, tensor, opts])
+
+      true ->
+        try do
+          # Nx complex tensors are stored as f32 LE re/im interleaved.
+          bin = bin_of(tensor)
+          out_bin = NxArm.Native.fft_complex_op(bin)
+          put_in(out.data, %__MODULE__{bin: out_bin})
+        rescue
+          _ -> fallback(:fft, [out, tensor, opts])
+        catch
+          :error, _ -> fallback(:fft, [out, tensor, opts])
+        end
+    end
+  end
 
   @impl true
-  def ifft(out, tensor, opts), do: fallback(:ifft, [out, tensor, opts])
+  def ifft(out, tensor, opts) do
+    cond do
+      not function_exported?(NxArm.Native, :ifft_complex_op, 1) ->
+        fallback(:ifft, [out, tensor, opts])
+
+      Nx.type(tensor) != {:c, 64} ->
+        fallback(:ifft, [out, tensor, opts])
+
+      true ->
+        try do
+          bin = bin_of(tensor)
+          out_bin = NxArm.Native.ifft_complex_op(bin)
+          put_in(out.data, %__MODULE__{bin: out_bin})
+        rescue
+          _ -> fallback(:ifft, [out, tensor, opts])
+        catch
+          :error, _ -> fallback(:ifft, [out, tensor, opts])
+        end
+    end
+  end
 
   @impl true
   def triangular_solve(out, a, b, opts),

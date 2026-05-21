@@ -54,6 +54,8 @@ defmodule NxArm.MixProject do
       # CPU governor scoping + big.LITTLE topology — extracted from
       # nx_arm into its own package since it isn't Nx-specific.
       {:nerves_cpu, path: "../nerves_cpu"},
+      # First-boot model downloader — same story.
+      {:nerves_model_hub, path: "../nerves_model_hub"},
       {:axon, "~> 0.7", only: [:test]},
       {:bumblebee, "~> 0.6", only: [:test]},
       {:rustler, "~> 0.36", optional: true},

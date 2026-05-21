@@ -38,12 +38,17 @@ tract-onnx = { version = "0.21", default-features = false, optional = true }
 # pipelines to get 16 kHz mono f32 input).
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "flac", "ogg", "vorbis", "pcm"], optional = true }
 rubato = { version = "0.16", default-features = false, optional = true }
+byteorder = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
 
 [features]
-default = ["llm", "onnx", "audio"]
+default = ["llm", "onnx", "audio", "whisper"]
 # All-rust LLM stack: candle + tokenizers.
 llm = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers"]
 # tract-onnx — the universal HuggingFace model path. Heavy.
 onnx = ["dep:tract-onnx"]
 # Audio decode + resample for the Whisper / VAD path. Cheap.
 audio = ["dep:symphonia", "dep:rubato"]
+# Speech-to-text via candle-whisper. Requires llm + audio + a couple
+# of small parser/byteorder deps for the mel filters.
+whisper = ["llm", "audio", "dep:byteorder", "dep:serde_json"]

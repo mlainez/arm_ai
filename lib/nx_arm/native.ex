@@ -464,6 +464,15 @@ defmodule NxArm.Native do
   @spec top_k_indices_f32_op(binary(), pos_integer()) :: [non_neg_integer()]
   def top_k_indices_f32_op(_scores, _k), do: :erlang.nif_error(:nif_not_loaded)
 
+  # --- Whisper (candle-transformers) ---
+
+  @spec whisper_load_op(String.t(), String.t(), String.t(), String.t()) :: reference()
+  def whisper_load_op(_model, _tok, _mel, _config),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec whisper_transcribe_op(reference(), binary()) :: String.t()
+  def whisper_transcribe_op(_handle, _pcm), do: :erlang.nif_error(:nif_not_loaded)
+
   # --- Vision (image + fast_image_resize) ---
 
   @spec vision_decode_to_rgb8_op(String.t()) :: {binary(), pos_integer(), pos_integer()}
@@ -493,6 +502,10 @@ defmodule NxArm.Native do
 
   @spec audio_load_for_whisper_op(String.t()) :: binary()
   def audio_load_for_whisper_op(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec audio_write_wav_op(String.t(), binary(), pos_integer(), pos_integer()) :: :ok
+  def audio_write_wav_op(_path, _samples, _sr, _channels),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   # --- ONNX (tract-onnx) ---
 

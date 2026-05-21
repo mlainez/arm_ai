@@ -1329,6 +1329,7 @@ dependencies = [
 name = "nx_arm_nif"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "candle-core",
  "candle-nn",
  "candle-transformers",
@@ -1341,6 +1342,7 @@ dependencies = [
  "rubato",
  "rustler",
  "safetensors",
+ "serde_json",
  "symphonia",
  "tokenizers",
  "tract-onnx",

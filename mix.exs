@@ -48,6 +48,7 @@ defmodule NxArm.MixProject do
     [
       {:nx, "~> 0.9"},
       {:axon, "~> 0.7", only: [:test]},
+      {:bumblebee, "~> 0.6", only: [:test]},
       {:rustler, "~> 0.36", optional: true},
       {:rustler_precompiled, "~> 0.8"},
       {:stream_data, "~> 1.1", only: [:test]}

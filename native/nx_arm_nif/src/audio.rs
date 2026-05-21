@@ -234,3 +234,52 @@ pub fn decode_to_mono_at(path: &str, target_hz: u32) -> Result<Vec<f32>, String>
     let mono = to_mono(&decoded.samples, decoded.channels);
     resample(&mono, decoded.sample_rate, target_hz)
 }
+
+/// Write mono f32 samples in `[-1.0, 1.0]` to a 16-bit PCM WAV file.
+/// Small enough that pulling in `hound` would be heavier than the
+/// 44-byte header we write by hand here.
+pub fn write_wav_pcm16(
+    path: &str,
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let bytes_per_sample = 2;
+    let n_samples = samples.len();
+    let data_bytes = (n_samples * bytes_per_sample) as u32;
+    let byte_rate = sample_rate * channels as u32 * bytes_per_sample as u32;
+
+    let mut file = std::fs::File::create(path).map_err(|e| format!("create {}: {}", path, e))?;
+
+    let header_writes: Result<(), std::io::Error> = (|| {
+        file.write_all(b"RIFF")?;
+        file.write_all(&(36 + data_bytes).to_le_bytes())?;
+        file.write_all(b"WAVE")?;
+        file.write_all(b"fmt ")?;
+        file.write_all(&16u32.to_le_bytes())?; // fmt chunk size
+        file.write_all(&1u16.to_le_bytes())?; // PCM format
+        file.write_all(&channels.to_le_bytes())?;
+        file.write_all(&sample_rate.to_le_bytes())?;
+        file.write_all(&byte_rate.to_le_bytes())?;
+        file.write_all(&(channels * bytes_per_sample as u16).to_le_bytes())?;
+        file.write_all(&16u16.to_le_bytes())?; // bits per sample
+        file.write_all(b"data")?;
+        file.write_all(&data_bytes.to_le_bytes())?;
+        Ok(())
+    })();
+    header_writes.map_err(|e| format!("wav header: {}", e))?;
+
+    // Convert f32 [-1.0, 1.0] → i16. Clip on overflow.
+    let mut buf = Vec::with_capacity(n_samples * 2);
+    for &s in samples {
+        let clipped = s.clamp(-1.0, 1.0);
+        let v = (clipped * 32767.0) as i16;
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    file.write_all(&buf)
+        .map_err(|e| format!("wav data: {}", e))?;
+
+    Ok(())
+}

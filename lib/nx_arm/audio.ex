@@ -68,4 +68,23 @@ defmodule NxArm.Audio do
     bin = NxArm.Native.audio_load_for_whisper_op(path)
     Nx.from_binary(bin, :f32) |> Nx.backend_copy(NxArm.Backend)
   end
+
+  @doc """
+  Write mono f32 samples in `[-1.0, 1.0]` to a 16-bit PCM WAV file.
+  Used for saving TTS output, Whisper round-trips, etc.
+  """
+  @spec write_wav(Path.t(), Nx.Tensor.t() | binary(), keyword()) :: :ok
+  def write_wav(path, samples, opts \\ []) do
+    sample_rate = Keyword.get(opts, :sample_rate, 22050)
+    channels = Keyword.get(opts, :channels, 1)
+
+    bin =
+      cond do
+        is_binary(samples) -> samples
+        match?(%Nx.Tensor{}, samples) -> NxArm.Backend.__bin_of__(samples)
+      end
+
+    NxArm.Native.audio_write_wav_op(path, bin, sample_rate, channels)
+    :ok
+  end
 end

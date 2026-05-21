@@ -18,6 +18,8 @@ mod shape_ops;
 #[cfg(feature = "llm")]
 mod tokenizer;
 mod topology;
+#[cfg(feature = "whisper")]
+mod whisper_candle;
 
 use rustler::{Env, NifResult, OwnedBinary, ResourceArc};
 
@@ -1895,6 +1897,22 @@ fn audio_resample_op<'a>(
 
 #[cfg(feature = "audio")]
 #[rustler::nif(schedule = "DirtyCpu")]
+fn audio_write_wav_op(
+    path: String,
+    samples: rustler::Binary,
+    sample_rate: u32,
+    channels: u16,
+) -> NifResult<rustler::Atom> {
+    let s: &[f32] = unsafe {
+        std::slice::from_raw_parts(samples.as_ptr() as *const f32, samples.as_slice().len() / 4)
+    };
+    audio::write_wav_pcm16(&path, s, sample_rate, channels)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("write_wav: {}", e))))?;
+    Ok(atoms::ok())
+}
+
+#[cfg(feature = "audio")]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn audio_load_for_whisper_op<'a>(
     env: Env<'a>,
     path: String,
@@ -1902,6 +1920,36 @@ fn audio_load_for_whisper_op<'a>(
     let samples = audio::decode_to_mono_at(&path, 16_000)
         .map_err(|e| rustler::Error::Term(Box::new(format!("audio for whisper: {}", e))))?;
     f32_vec_to_bin(env, &samples)
+}
+
+// ---------------------------------------------------------------
+// Whisper bridge (candle-transformers).
+// ---------------------------------------------------------------
+
+#[cfg(feature = "whisper")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn whisper_load_op(
+    model_path: String,
+    tokenizer_json_path: String,
+    mel_filters_path: String,
+    config_path: String,
+) -> NifResult<ResourceArc<whisper_candle::WhisperResource>> {
+    let res = whisper_candle::load(&model_path, &tokenizer_json_path, &mel_filters_path, &config_path)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("whisper load: {}", e))))?;
+    Ok(ResourceArc::new(res))
+}
+
+#[cfg(feature = "whisper")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn whisper_transcribe_op(
+    res: ResourceArc<whisper_candle::WhisperResource>,
+    pcm: rustler::Binary,
+) -> NifResult<String> {
+    let samples: &[f32] = unsafe {
+        std::slice::from_raw_parts(pcm.as_ptr() as *const f32, pcm.as_slice().len() / 4)
+    };
+    whisper_candle::transcribe(&res, samples)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("whisper transcribe: {}", e))))
 }
 
 fn load(env: Env, _info: rustler::Term) -> bool {
@@ -1914,6 +1962,10 @@ fn load(env: Env, _info: rustler::Term) -> bool {
     #[cfg(feature = "onnx")]
     {
         rustler::resource!(onnx::OnnxModelResource, env);
+    }
+    #[cfg(feature = "whisper")]
+    {
+        rustler::resource!(whisper_candle::WhisperResource, env);
     }
     true
 }

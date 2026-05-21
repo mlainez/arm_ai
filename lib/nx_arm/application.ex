@@ -6,6 +6,9 @@ defmodule NxArm.Application do
 
   @impl true
   def start(_type, _args) do
+    # Run BEFORE the rayon pool init so any setup that touches the
+    # data partition (model load, etc.) sees the grown FS.
+    _ = NxArm.StorageResizer.run()
     auto_init_thread_pool()
     warm_up_dirty_schedulers()
     Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)

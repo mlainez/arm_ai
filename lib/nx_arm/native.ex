@@ -357,6 +357,25 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  NEON-accelerated Q4_0 GEMV (M=1). Same layout as
+  `int4_matmul_f32_op` but specialised for single-row decode-time
+  matmuls (lm_head, per-layer projections during token-by-token
+  inference). Returns f32 output `[1, N]`.
+  """
+  @spec int4_matmul_gemv_neon_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer()) :: binary()
+  def int4_matmul_gemv_neon_op(_a, _w_packed, _w_scales, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Dequantize a GGML Q6_K blob to f32. `input` is the raw packed
+  Q6_K bytes (210 bytes per 256-weight super-block); `n_elements`
+  is the total weight count. Returns f32 LE.
+  """
+  @spec dequantize_q6_k_op(binary(), pos_integer()) :: binary()
+  def dequantize_q6_k_op(_input, _n_elements),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Int8 matmul with per-token activation scales. `act_scales` is a
   length-M f32 LE binary -- one scale per row of A. Equivalent to
   `int8_matmul_f32_op` but with per-row dequant, recovering accuracy

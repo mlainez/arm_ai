@@ -33,11 +33,16 @@ defmodule NxArm.KVCache do
   @spec new(pos_integer(), pos_integer(), pos_integer(), pos_integer(), Keyword.t()) :: t()
   def new(n_layers, n_heads, max_seq, head_dim, opts \\ []) do
     type = Keyword.get(opts, :type, {:f, 32})
+    backend = Keyword.get(opts, :backend, NxArm.Backend)
     shape = {n_layers, n_heads, max_seq, head_dim}
 
+    zeros =
+      Nx.broadcast(Nx.tensor(0, type: type), shape)
+      |> Nx.backend_copy(backend)
+
     %__MODULE__{
-      k: Nx.broadcast(Nx.tensor(0, type: type), shape),
-      v: Nx.broadcast(Nx.tensor(0, type: type), shape),
+      k: zeros,
+      v: zeros,
       length: 0,
       max_seq: max_seq,
       n_layers: n_layers,

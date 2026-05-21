@@ -276,6 +276,44 @@ fn quantize_int8_per_token_op<'a>(
     Ok((q_bin.release(env), s_bin.release(env)))
 }
 
+/// Dequantize a GGML Q6_K blob into a fresh f32 binary. Used to
+/// materialise LM head weights at model load time since Q6_K
+/// kernels aren't yet implemented inline.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn dequantize_q6_k_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    n_elements: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let mut out = vec![0.0f32; n_elements];
+    shape_ops::dequantize_q6_k(input.as_slice(), &mut out);
+    f32_vec_to_bin(env, &out)
+}
+
+/// NEON Q4_0 GEMV (M=1 specialised). Pulled out so decode-time
+/// LLM matmuls (lm_head, per-layer projections) skip the scalar
+/// path and hit ~5-10× over `int4_matmul_f32_op` for M=1.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn int4_matmul_gemv_neon_op<'a>(
+    env: Env<'a>,
+    a: rustler::Binary<'a>,
+    w_packed: rustler::Binary<'a>,
+    w_scales: rustler::Binary<'a>,
+    n: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let a_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(a.as_ptr() as *const f32, k)
+    };
+    let w_packed_slice: &[u8] = w_packed.as_slice();
+    let w_scales_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(w_scales.as_ptr() as *const f32, n * (k / 32))
+    };
+
+    let out = shape_ops::int4_matmul_gemv_neon(a_slice, w_packed_slice, w_scales_slice, n, k);
+    f32_vec_to_bin(env, &out)
+}
+
 /// Int4 (Q4_0) matmul: f32 activations × packed int4 weights with
 /// per-group (group_size=32) f32 scales. Returns f32 outputs.
 #[rustler::nif(schedule = "DirtyCpu")]

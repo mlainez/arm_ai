@@ -3427,6 +3427,225 @@ pub fn reduce_axis_f32(op: &str, input: &[f32], n_outer: usize, inner: usize) ->
 // but the loop handles general M.
 // ---------------------------------------------------------------
 
+/// Dequantize a GGML Q6_K tensor to f32 in place.
+///
+/// Block layout (one super-block = 256 weights, 210 bytes):
+///   * `ql`: 128 bytes — low 4 bits of each of 256 weights
+///   * `qh`: 64 bytes — high 2 bits of each of 256 weights
+///   * `scales`: 16 i8 sub-scales
+///   * `d`: 1 f16 super-scale
+///
+/// Decoded value (per llama.cpp ggml-quants.c):
+///   weight = d * sub_scale * (signed_6bit_value)
+///
+/// where the 6-bit value is reconstructed by packing the lower 4
+/// bits from `ql` with the upper 2 bits from `qh`, then subtracting
+/// the 32 bias to get a signed range [-32, 31].
+pub fn dequantize_q6_k(input: &[u8], out: &mut [f32]) {
+    const QK: usize = 256;
+    const BLOCK_BYTES: usize = 210;
+    let n_blocks = input.len() / BLOCK_BYTES;
+    assert_eq!(out.len(), n_blocks * QK);
+
+    for b in 0..n_blocks {
+        let block = &input[b * BLOCK_BYTES..(b + 1) * BLOCK_BYTES];
+        let out_slice = &mut out[b * QK..(b + 1) * QK];
+
+        let ql = &block[0..128];
+        let qh = &block[128..192];
+        let scales = &block[192..208];
+        let d_bits = u16::from_le_bytes([block[208], block[209]]);
+        let d = f16_bits_to_f32(d_bits);
+
+        // The 256 weights are processed in 2 halves of 128 (4 strides
+        // of 32 each inside one half).
+        for n in 0..2 {
+            let ql_base = n * 64;
+            let qh_base = n * 32;
+            let scale_base = n * 8;
+            let out_base = n * 128;
+
+            for l in 0..32 {
+                let qhi = qh[qh_base + l];
+
+                // 4 weights per inner iteration, spread across 4
+                // 32-element groups within this half.
+                let q1 = ((ql[ql_base + l] & 0xF) as i32 | (((qhi >> 0) & 3) as i32) << 4) - 32;
+                let q2 =
+                    ((ql[ql_base + l + 32] & 0xF) as i32 | (((qhi >> 2) & 3) as i32) << 4) - 32;
+                let q3 = (((ql[ql_base + l] >> 4) & 0xF) as i32
+                    | (((qhi >> 4) & 3) as i32) << 4)
+                    - 32;
+                let q4 = (((ql[ql_base + l + 32] >> 4) & 0xF) as i32
+                    | (((qhi >> 6) & 3) as i32) << 4)
+                    - 32;
+
+                let s1 = scales[scale_base + 0] as i32;
+                let s2 = scales[scale_base + 2] as i32;
+                let s3 = scales[scale_base + 4] as i32;
+                let s4 = scales[scale_base + 6] as i32;
+
+                out_slice[out_base + l + 0]  = d * (s1 * q1) as f32;
+                out_slice[out_base + l + 32] = d * (s2 * q2) as f32;
+                out_slice[out_base + l + 64] = d * (s3 * q3) as f32;
+                out_slice[out_base + l + 96] = d * (s4 * q4) as f32;
+            }
+        }
+    }
+}
+
+fn f16_bits_to_f32(h: u16) -> f32 {
+    let s = ((h >> 15) & 0x1) as u32;
+    let e = ((h >> 10) & 0x1F) as u32;
+    let m = (h & 0x3FF) as u32;
+
+    if e == 0 {
+        if m == 0 {
+            if s == 1 { -0.0 } else { 0.0 }
+        } else {
+            // Subnormal.
+            let sign = if s == 1 { -1.0 } else { 1.0 };
+            sign * (2.0_f32).powi(-14) * (m as f32) / 1024.0
+        }
+    } else if e == 31 {
+        if m == 0 {
+            if s == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
+        } else {
+            f32::NAN
+        }
+    } else {
+        let sign = if s == 1 { -1.0 } else { 1.0 };
+        sign * (2.0_f32).powi(e as i32 - 15) * (1.0 + (m as f32) / 1024.0)
+    }
+}
+
+/// NEON Q4_0 GEMV: `y = a · W^T` where `a` is f32 (1, K) and `W`
+/// is the GGUF Q4_0 packed-int4 weight (N, K) with one f32 scale
+/// per 32-weight group along K.
+///
+/// Each output channel j computes `acc = Σ_k a[k] * dequant(W[j, k])`
+/// over its K weights. Decode-time LLM matmuls are this shape (M=1)
+/// for every projection.
+///
+/// Strategy per (j, group):
+///   1. Read 16 packed bytes (32 weights).
+///   2. Unpack low + high nibble streams into two i8x16 vectors,
+///      subtract 8, widen to i16, widen to f32 (4 lanes at a time).
+///   3. FMA against 32 contiguous f32 activations.
+///   4. Multiply accumulated sum by the group scale and accumulate
+///      into the per-j output.
+///
+/// Parallelism: rayon-split over output channels j.
+#[cfg(target_arch = "aarch64")]
+pub fn int4_matmul_gemv_neon(
+    a: &[f32],
+    w_packed: &[u8],
+    w_scales: &[f32],
+    n: usize,
+    k: usize,
+) -> Vec<f32> {
+    use core::arch::aarch64::*;
+    use rayon::prelude::*;
+
+    const GROUP: usize = 32;
+    let n_groups = k / GROUP;
+    let bytes_per_row = k / 2;
+
+    let mut out = vec![0.0f32; n];
+
+    out.par_iter_mut().enumerate().for_each(|(j, slot)| {
+        let row_packed = &w_packed[j * bytes_per_row..(j + 1) * bytes_per_row];
+        let row_scales = &w_scales[j * n_groups..(j + 1) * n_groups];
+
+        let mut total = 0.0f32;
+
+        for g in 0..n_groups {
+            let scale = row_scales[g];
+            let group_pack = &row_packed[g * (GROUP / 2)..(g + 1) * (GROUP / 2)];
+            let group_act = &a[g * GROUP..(g + 1) * GROUP];
+
+            unsafe {
+                // Load 16 packed bytes (32 nibbles).
+                let pack = vld1q_u8(group_pack.as_ptr());
+
+                // Low nibble of each byte = even-k weight.
+                let low_mask = vdupq_n_u8(0x0F);
+                let low_nib = vandq_u8(pack, low_mask);
+                // High nibble = odd-k weight.
+                let high_nib = vshrq_n_u8(pack, 4);
+
+                // GGUF Q4_0 stores values as unsigned [0, 15] with
+                // a -8 bias on decode.
+                let bias = vdupq_n_s8(-8);
+                let low_s8 = vaddq_s8(vreinterpretq_s8_u8(low_nib), bias);
+                let high_s8 = vaddq_s8(vreinterpretq_s8_u8(high_nib), bias);
+
+                // Widen 16-lane i8 → 8+8-lane i16 (low + high halves).
+                let low_lo_i16 = vmovl_s8(vget_low_s8(low_s8));
+                let low_hi_i16 = vmovl_high_s8(low_s8);
+                let high_lo_i16 = vmovl_s8(vget_low_s8(high_s8));
+                let high_hi_i16 = vmovl_high_s8(high_s8);
+
+                // The 32 weights are interleaved: byte b stores
+                // (high<<4 | low) where low = weight at k=2b and
+                // high = weight at k=2b+1. So position-wise:
+                //   k:  0  1  2  3  4  5 ...
+                //   src low[0] high[0] low[1] high[1] low[2] high[2]
+                //
+                // We materialise the 32 weights in k order by zip-
+                // interleaving the low/high streams.
+                let lo_lo_i16 = vzip1q_s16(low_lo_i16, high_lo_i16);
+                let lo_hi_i16 = vzip2q_s16(low_lo_i16, high_lo_i16);
+                let hi_lo_i16 = vzip1q_s16(low_hi_i16, high_hi_i16);
+                let hi_hi_i16 = vzip2q_s16(low_hi_i16, high_hi_i16);
+
+                // 4 chunks of 8 i16 weights each. Widen to i32 then
+                // convert to f32, scale, FMA against activations.
+                let group_acc = process_chunk(group_act, 0, lo_lo_i16)
+                    + process_chunk(group_act, 8, lo_hi_i16)
+                    + process_chunk(group_act, 16, hi_lo_i16)
+                    + process_chunk(group_act, 24, hi_hi_i16);
+
+                total += group_acc * scale;
+            }
+        }
+
+        *slot = total;
+    });
+
+    out
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn process_chunk(act: &[f32], offset: usize, weights_i16: core::arch::aarch64::int16x8_t) -> f32 {
+    use core::arch::aarch64::*;
+    // Widen 8 i16 → 8 i32, then convert to 8 f32 in two halves.
+    let lo_i32 = vmovl_s16(vget_low_s16(weights_i16));
+    let hi_i32 = vmovl_high_s16(weights_i16);
+    let lo_f32 = vcvtq_f32_s32(lo_i32);
+    let hi_f32 = vcvtq_f32_s32(hi_i32);
+
+    let act_lo = vld1q_f32(act.as_ptr().add(offset));
+    let act_hi = vld1q_f32(act.as_ptr().add(offset + 4));
+
+    let prod_lo = vmulq_f32(act_lo, lo_f32);
+    let prod_hi = vmulq_f32(act_hi, hi_f32);
+    vaddvq_f32(vaddq_f32(prod_lo, prod_hi))
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn int4_matmul_gemv_neon(
+    a: &[f32],
+    w_packed: &[u8],
+    w_scales: &[f32],
+    n: usize,
+    k: usize,
+) -> Vec<f32> {
+    // Non-aarch64 fallback: just use the scalar path.
+    int4_matmul_f32(a, w_packed, w_scales, 1, n, k).unwrap()
+}
+
 /// Int4 GEMM: `A (M, K) f32` × `W^T (K, N) int4-packed` → `Y (M, N) f32`.
 /// The weight matrix is stored output-major (one block of int4 weights
 /// per output channel) which matches the GGUF Q4_0 layout and is the

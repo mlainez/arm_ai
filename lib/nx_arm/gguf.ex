@@ -37,6 +37,12 @@ defmodule NxArm.GGUF do
     7 => :q5_1,
     8 => :q8_0,
     9 => :q8_1,
+    10 => :q2_k,
+    11 => :q3_k,
+    12 => :q4_k,
+    13 => :q5_k,
+    14 => :q6_k,
+    15 => :q8_k,
     24 => :i8,
     25 => :i16,
     26 => :i32,
@@ -332,6 +338,13 @@ defmodule NxArm.GGUF do
       :q8_0 -> div(n_elems, 32) * 34
       # Q8_1: 32 weights / block, block = 2 + 2 + 32 = 36 bytes.
       :q8_1 -> div(n_elems, 32) * 36
+      # K-quants: 256 weights per super-block.
+      :q2_k -> div(n_elems, 256) * 84
+      :q3_k -> div(n_elems, 256) * 110
+      :q4_k -> div(n_elems, 256) * 144
+      :q5_k -> div(n_elems, 256) * 176
+      :q6_k -> div(n_elems, 256) * 210
+      :q8_k -> div(n_elems, 256) * 292
       {:unknown, _} -> 0
     end
   end
@@ -403,4 +416,110 @@ defmodule NxArm.GGUF do
 
   defp ok_or({:ok, _} = ok, _), do: ok
   defp ok_or(:error, reason), do: {:error, reason}
+
+  @doc """
+  Unpack a Q8_0 tensor into `{i8_weights_bin, scales_bin}` where the
+  i8 weights are `[N, K]` row-major (signed bytes) and scales are
+  `[N, K/32]` f32 LE — one scale per 32-weight group.
+
+  GGML Q8_0 block layout (one block = 32 weights):
+    * `d`: f16 scale (2 bytes)
+    * `qs`: 32 int8 weights (32 bytes)
+  Block size = 34 bytes.
+  """
+  @spec q8_0_unpack(t(), String.t()) ::
+          {:ok, %{weights: binary(), scales: binary(), n: pos_integer(), k: pos_integer()}}
+          | {:error, term()}
+  def q8_0_unpack(gguf, name) do
+    with {:ok, info} <- Map.fetch(gguf.tensors, name) |> ok_or(:not_found),
+         :q8_0 <- info.dtype,
+         {:ok, raw} <- tensor_bytes(gguf, name) do
+      [k | rest_dims] = info.shape
+      n = Enum.reduce(rest_dims, 1, &(&1 * &2))
+
+      if rem(k, 32) != 0 do
+        {:error, {:bad_q8_0_shape, info.shape}}
+      else
+        n_groups = div(k, 32)
+        {weights, scales} = split_q8_0(raw, n, n_groups)
+        {:ok, %{weights: weights, scales: scales, n: n, k: k}}
+      end
+    else
+      dtype when is_atom(dtype) -> {:error, {:not_q8_0, dtype}}
+      err -> err
+    end
+  end
+
+  defp split_q8_0(raw, n_rows, n_groups) do
+    do_split_q8_rows(raw, n_rows, n_groups, [], [])
+  end
+
+  defp do_split_q8_rows(_rest, 0, _ng, w_acc, s_acc) do
+    {IO.iodata_to_binary(Enum.reverse(w_acc)),
+     IO.iodata_to_binary(Enum.reverse(s_acc))}
+  end
+
+  defp do_split_q8_rows(rest, rows_left, n_groups, w_acc, s_acc) do
+    {row_w, row_s, rest1} = do_split_q8_groups(rest, n_groups, [], [])
+
+    do_split_q8_rows(
+      rest1,
+      rows_left - 1,
+      n_groups,
+      [row_w | w_acc],
+      [row_s | s_acc]
+    )
+  end
+
+  defp do_split_q8_groups(rest, 0, w_acc, s_acc) do
+    {Enum.reverse(w_acc), Enum.reverse(s_acc), rest}
+  end
+
+  defp do_split_q8_groups(<<scale_f16::little-16, weights::binary-size(32), rest::binary>>, g, w_acc, s_acc) do
+    scale_f32 = f16_to_f32(scale_f16)
+    do_split_q8_groups(rest, g - 1, [weights | w_acc], [<<scale_f32::float-32-little>> | s_acc])
+  end
+
+  @doc """
+  Dequantize one Q4_0 row to f32. Used for embedding lookups when
+  the token_embd is Q4_0 (TinyLlama 1.1B Chat ships this way).
+  """
+  @spec q4_0_dequant_row(%{packed: binary(), scales: binary(), n: pos_integer(), k: pos_integer()}, non_neg_integer()) :: binary()
+  def q4_0_dequant_row(%{packed: p, scales: s, k: k}, row) do
+    n_groups = div(k, 32)
+    bytes_per_row = div(k, 2)
+    row_p = binary_part(p, row * bytes_per_row, bytes_per_row)
+    row_s = binary_part(s, row * n_groups * 4, n_groups * 4)
+
+    for g <- 0..(n_groups - 1), into: <<>> do
+      group_p = binary_part(row_p, g * 16, 16)
+      <<scale::float-32-little>> = binary_part(row_s, g * 4, 4)
+
+      for <<byte::8 <- group_p>>, into: <<>> do
+        lo = Bitwise.band(byte, 0x0F) - 8
+        hi = Bitwise.band(Bitwise.bsr(byte, 4), 0x0F) - 8
+        <<lo * scale::float-32-little, hi * scale::float-32-little>>
+      end
+    end
+  end
+
+  @doc """
+  Dequantize one Q8_0 row to f32. Useful for embedding lookups
+  where we need just a single row.
+  """
+  @spec q8_0_dequant_row(%{weights: binary(), scales: binary(), n: pos_integer(), k: pos_integer()}, non_neg_integer()) :: binary()
+  def q8_0_dequant_row(%{weights: w, scales: s, k: k}, row) do
+    n_groups = div(k, 32)
+    row_w = binary_part(w, row * k, k)
+    row_s = binary_part(s, row * n_groups * 4, n_groups * 4)
+
+    for g <- 0..(n_groups - 1), into: <<>> do
+      group_w = binary_part(row_w, g * 32, 32)
+      <<scale::float-32-little>> = binary_part(row_s, g * 4, 4)
+
+      for <<v::signed-8 <- group_w>>, into: <<>> do
+        <<v * scale::float-32-little>>
+      end
+    end
+  end
 end

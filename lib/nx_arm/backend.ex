@@ -287,12 +287,20 @@ defmodule NxArm.Backend do
       not both_f32? ->
         fallback(:dot, [out, left, [left_contract_axis], [], right, [right_contract_axis], []])
 
-      # Plain 2-D × 2-D.
+      # Plain 2-D × 2-D, x @ w.
       tuple_size(left_shape) == 2 and tuple_size(right_shape) == 2 and
           left_contract_axis == 1 and right_contract_axis == 0 ->
         {m, k} = left_shape
         {_k, n} = right_shape
         cpu_matmul_2d(out, left, right, m, n, k)
+
+      # 2-D × 2-D, x @ w^T (output-major weights, the
+      # Axon/Bumblebee Dense convention).
+      tuple_size(left_shape) == 2 and tuple_size(right_shape) == 2 and
+          left_contract_axis == 1 and right_contract_axis == 1 ->
+        {m, k} = left_shape
+        {n, _k} = right_shape
+        cpu_matmul_2d_right_transposed(out, left, right, m, n, k)
 
       # 3-D+ × 2-D — Axon/Bumblebee Linear pattern. Fold leading dims
       # into M and use the same path; the output buffer is laid out
@@ -309,9 +317,29 @@ defmodule NxArm.Backend do
         reshaped = Nx.reshape(flat, Nx.shape(out))
         put_in(out.data, reshaped.data)
 
+      # 3-D+ × 2-D, contracting last with last (x @ w^T flavour).
+      tuple_size(right_shape) == 2 and right_contract_axis == 1 and
+          left_contract_axis == tuple_size(left_shape) - 1 ->
+        {n, _k} = right_shape
+        k = elem(left_shape, tuple_size(left_shape) - 1)
+        lead = left_shape |> Tuple.delete_at(tuple_size(left_shape) - 1)
+        m = lead |> Tuple.to_list() |> Enum.reduce(1, &(&1 * &2))
+
+        flat_out = %Nx.Tensor{shape: {m, n}, type: {:f, 32}, names: [nil, nil]}
+        flat = cpu_matmul_2d_right_transposed(flat_out, left, right, m, n, k)
+        reshaped = Nx.reshape(flat, Nx.shape(out))
+        put_in(out.data, reshaped.data)
+
       true ->
         fallback(:dot, [out, left, [left_contract_axis], [], right, [right_contract_axis], []])
     end
+  end
+
+  defp cpu_matmul_2d_right_transposed(out, left, right, m, n, k) do
+    # left: (M, K) row-major. right: (N, K) row-major, contract on K.
+    # batched_matmul_f32_op already supports right_transposed=true.
+    bin = NxArm.Native.batched_matmul_f32_op(bin_of(left), bin_of(right), 1, m, n, k, true)
+    put_in(out.data, %__MODULE__{bin: bin})
   end
 
   # Batched 4-D dot for transformer attention: Q @ K^T and attn @ V.

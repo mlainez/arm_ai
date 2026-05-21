@@ -15,6 +15,54 @@ defmodule NxArm.LLM do
 
       out = NxArm.LLM.rmsnorm(x, gamma, 1.0e-5)
   """
+  @doc """
+  Fused linear layer: `y = activation(x · W^T + b)`.
+
+  * `x` shape: `{M, K}` or `{B, M, K}` (any leading-batch).
+  * `weight` shape: `{N, K}` (output-major — matches how Bumblebee
+    + Axon lay dense weights).
+  * `bias` shape: `{N}` or `nil`.
+  * `activation`: `:none | :relu | :relu6 | :sigmoid | :tanh | :gelu`.
+
+  Avoids the BEAM round-trips of separate `Nx.dot` + `Nx.add` +
+  activation calls. The same `linear_f32` NIF that powers the
+  compiler-side bias-add pattern; this is the direct-call form
+  for hot paths that don't want to rely on pattern recognition.
+  """
+  def linear(%Nx.Tensor{} = x, %Nx.Tensor{} = weight, bias, activation \\ :none) do
+    {b_dim, m_dim, k_dim, out_shape, n_dim} =
+      case {Nx.shape(x), Nx.shape(weight)} do
+        {{m, k}, {n, k2}} when k == k2 ->
+          {1, m, k, {m, n}, n}
+
+        {{b, m, k}, {n, k2}} when k == k2 ->
+          {b, m, k, {b, m, n}, n}
+
+        {x_shape, w_shape} ->
+          raise ArgumentError,
+                "linear: incompatible shapes x=#{inspect(x_shape)} weight=#{inspect(w_shape)}"
+      end
+
+    act_str =
+      case activation do
+        :none -> "none"
+        :relu -> "relu"
+        :relu6 -> "relu6"
+        :sigmoid -> "sigmoid"
+        :tanh -> "tanh"
+        :gelu -> "gelu"
+      end
+
+    x_bin = NxArm.Backend.__bin_of__(x)
+    w_bin = NxArm.Backend.__bin_of__(weight)
+    b_bin = if bias, do: NxArm.Backend.__bin_of__(bias), else: <<>>
+
+    out_bin =
+      NxArm.Native.linear_f32_op(x_bin, w_bin, b_bin, act_str, b_dim, m_dim, n_dim, k_dim)
+
+    %{x | data: %NxArm.Backend{bin: out_bin}, shape: out_shape, type: {:f, 32}}
+  end
+
   def rmsnorm(%Nx.Tensor{} = x, %Nx.Tensor{} = gamma, epsilon \\ 1.0e-5) do
     shape = Nx.shape(x) |> Tuple.to_list()
     rank = length(shape)

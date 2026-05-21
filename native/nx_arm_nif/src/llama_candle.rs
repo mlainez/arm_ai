@@ -21,7 +21,7 @@
 
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
-use crate::quantized_llama_inplace::ModelWeights;
+use candle_transformers::models::quantized_llama::ModelWeights;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Mutex;

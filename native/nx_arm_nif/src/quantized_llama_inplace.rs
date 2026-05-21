@@ -23,6 +23,24 @@ use candle_nn::{Embedding, Module};
 
 pub const MAX_SEQ_LEN: usize = 4096;
 
+// KV-cache rolling-buffer capacity. Each layer pre-allocates two
+// `[1, n_kv_head, KV_CACHE_CAPACITY, head_dim]` f32 buffers at
+// load time (one for K, one for V). For TinyLlama-class models
+// (22 layers, n_kv_head=4, head_dim=64), 512 tokens is:
+//
+//     22 layers × 2 (K+V) × 1 × 4 × 512 × 64 × 4 B ≈ 23 MB
+//
+// At 4096 tokens that becomes ~180 MB — measured to OOM under
+// the FP3 production load (modem + audio + nfc + 660 MB GGUF
+// already resident), tripping the hardware watchdog into a
+// reboot loop.
+//
+// 512 covers every chat / RAG / summarisation use case we ship
+// in `examples/`. Bump this if you need longer-form generation,
+// but verify free RAM on your target first:
+//   `free -m` should leave ≥ 200 MB headroom after model load.
+pub const KV_CACHE_CAPACITY: usize = 512;
+
 // RmsNorm vendored from candle-transformers::quantized_nn (Apache-2.0)
 // so we don't pull in `crate::quantized_nn` (which isn't exposed
 // outside candle-transformers). Behaviour is identical.
@@ -342,7 +360,7 @@ impl ModelWeights {
                 neg_inf: neg_inf.clone(),
                 // dim=2 is seq_len in `[b, n_kv_head, seq_len, head_dim]`.
                 // Pre-allocate the full rolling buffer once.
-                kv_cache: KvCache::new(2, MAX_SEQ_LEN),
+                kv_cache: KvCache::new(2, KV_CACHE_CAPACITY),
             })
         }
         Ok(Self {
@@ -457,7 +475,7 @@ impl ModelWeights {
                 neg_inf: neg_inf.clone(),
                 // dim=2 is seq_len in `[b, n_kv_head, seq_len, head_dim]`.
                 // Pre-allocate the full rolling buffer once.
-                kv_cache: KvCache::new(2, MAX_SEQ_LEN),
+                kv_cache: KvCache::new(2, KV_CACHE_CAPACITY),
             })
         }
         Ok(Self {

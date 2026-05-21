@@ -41,6 +41,14 @@ overflow-checks = false
 rustler = "0.36"
 rayon = "1.10"
 memmap2 = "0.9"
+# mimalloc was tried as a global allocator swap for candle's
+# cat-based KV-cache churn. Result on FP3: boot loop on first
+# generate call. mimalloc's TLS initialisation appears to clash
+# with the BEAM scheduler's thread setup under the Nerves rootfs
+# (musl-flavoured glibc + small initial RSS budget). Revisit only
+# with a pinned thread-init order. Dependency removed; commented
+# here so future-me doesn't re-add it without re-testing.
+# mimalloc = { version = "0.1", default-features = false }
 # f32 GEMM, hand-tuned NEON. Used by every matmul. ~500 KB.
 gemm = "0.18"
 # IEEE 754 binary16 + bf16. Used in dozens of small places. ~10 KB.

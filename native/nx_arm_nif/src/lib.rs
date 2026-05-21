@@ -5,6 +5,10 @@
 // Elixir backend (NxArm.Backend) stores tensors as plain binaries
 // and dispatches each Nx callback to one of these.
 
+// mimalloc was tried here as a global allocator; on FP3 it boot-
+// looped (likely TLS init order vs the BEAM scheduler). Reverting
+// to the system allocator until that's understood. See Cargo.toml.
+
 #[cfg(feature = "audio")]
 mod audio;
 mod conv_int8;
@@ -16,8 +20,16 @@ mod safetensors_load;
 mod vision;
 #[cfg(feature = "llm")]
 mod llama_candle;
-#[cfg(feature = "llm")]
-mod quantized_llama_inplace;
+
+// quantized_llama_inplace.rs is an unused experimental variant that
+// vendored candle's quantized Llama with an in-place KvCache (replacing
+// the upstream `Tensor::cat` calls). Measured on FP3 / Snapdragon 632:
+// the narrow-view tensors returned by `KvCache::current_data()` aren't
+// contiguous, so the downstream `q.matmul(k.t())` and `repeat_kv` paths
+// trigger implicit `.contiguous()` materialisations that outweigh the
+// saved cat allocations. Net: 4.72 tok/s upstream → 4.55 tok/s with
+// the in-place cache. File kept in-tree as a record of the experiment;
+// not compiled into the .so.
 #[cfg(feature = "onnx")]
 mod onnx;
 mod ops;

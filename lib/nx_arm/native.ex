@@ -367,6 +367,17 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  NEON Q4_0 × Q8_0 GEMV (M=1). Pre-quantises activations to Q8_0,
+  keeps the inner FMA in int8 lanes (vmull_s8 → i16 → i32, scale
+  once per 32-weight group). 2-4× faster than the f32 path on
+  ARMv8.0 (A53/A72/A73) which lacks dotprod. Same return layout
+  as `int4_matmul_gemv_neon_op`.
+  """
+  @spec int4_matmul_gemv_q4_x_q8_neon_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer()) :: binary()
+  def int4_matmul_gemv_q4_x_q8_neon_op(_a, _w_packed, _w_scales, _n, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Dequantize a GGML Q6_K blob to f32. `input` is the raw packed
   Q6_K bytes (210 bytes per 256-weight super-block); `n_elements`
   is the total weight count. Returns f32 LE.

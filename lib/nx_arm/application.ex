@@ -11,7 +11,37 @@ defmodule NxArm.Application do
     _ = NxArm.StorageResizer.run()
     auto_init_thread_pool()
     warm_up_dirty_schedulers()
+    maybe_apply_boot_governor()
     Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
+  end
+
+  # By default we do NOT pin CPUs to `performance` at boot —
+  # ML inference is bursty, and pinning to max frequency
+  # continuously heats the device until thermal throttling kicks
+  # in. Use `NxArm.Performance.with_performance/1` to scope it to
+  # the actual inference call.
+  #
+  # Opt-in to always-on max clock via:
+  #
+  #     config :nx_arm, governor_at_boot: :performance
+  #
+  defp maybe_apply_boot_governor do
+    case Application.get_env(:nx_arm, :governor_at_boot, :default) do
+      :default ->
+        :ok
+
+      governor when is_atom(governor) ->
+        cores =
+          case NxArm.Runtime.topology() do
+            %{perf_cores: c} when is_list(c) and c != [] -> c
+            _ -> []
+          end
+
+        NxArm.Performance.set_governor(cores, Atom.to_string(governor))
+        Logger.info("[nx_arm] applied CPU governor #{governor} to #{inspect(cores)}")
+    end
+  rescue
+    e -> Logger.warning("[nx_arm] boot governor policy crashed: #{Exception.message(e)}")
   end
 
   # Make sure every BEAM dirty-CPU scheduler thread gets a chance to

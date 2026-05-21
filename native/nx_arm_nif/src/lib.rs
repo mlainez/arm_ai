@@ -334,6 +334,29 @@ fn dequantize_q6_k_op<'a>(
     f32_vec_to_bin(env, &out)
 }
 
+/// NEON Q4_0 × Q8_0 GEMV (M=1, dotprod-free). Best path for LLM
+/// decode-time matmuls on A73 / generic ARMv8.0+ ARM cores.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn int4_matmul_gemv_q4_x_q8_neon_op<'a>(
+    env: Env<'a>,
+    a: rustler::Binary<'a>,
+    w_packed: rustler::Binary<'a>,
+    w_scales: rustler::Binary<'a>,
+    n: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let a_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(a.as_ptr() as *const f32, k)
+    };
+    let w_packed_slice: &[u8] = w_packed.as_slice();
+    let w_scales_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(w_scales.as_ptr() as *const f32, n * (k / 32))
+    };
+
+    let out = shape_ops::int4_matmul_gemv_q4_x_q8_neon(a_slice, w_packed_slice, w_scales_slice, n, k);
+    f32_vec_to_bin(env, &out)
+}
+
 /// NEON Q4_0 GEMV (M=1 specialised). Pulled out so decode-time
 /// LLM matmuls (lm_head, per-layer projections) skip the scalar
 /// path and hit ~5-10× over `int4_matmul_f32_op` for M=1.

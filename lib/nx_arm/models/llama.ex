@@ -196,40 +196,50 @@ defmodule NxArm.Models.Llama do
     prompt = Keyword.fetch!(opts, :prompt_tokens)
     max_new = Keyword.get(opts, :max_new, 16)
     eos = Keyword.get(opts, :eos_token)
+    scope_governor? = Keyword.get(opts, :performance_governor, true)
 
-    cache = NxArm.KVCache.new(
-      model.config.n_layers,
-      model.config.n_kv_heads,
-      model.config.max_seq,
-      model.config.head_dim
-    )
+    do_generate = fn ->
+      cache = NxArm.KVCache.new(
+        model.config.n_layers,
+        model.config.n_kv_heads,
+        model.config.max_seq,
+        model.config.head_dim
+      )
 
-    {prefill_us, {logits_last, cache, n_prompt}} =
-      :timer.tc(fn -> prefill(model, prompt, cache) end)
+      {prefill_us, {logits_last, cache, n_prompt}} =
+        :timer.tc(fn -> prefill(model, prompt, cache) end)
 
-    next = greedy(logits_last)
+      next = greedy(logits_last)
 
-    {decode_us, {tokens, _cache}} =
-      :timer.tc(fn ->
-        decode_loop(model, [next], cache, n_prompt, max_new - 1, eos)
-      end)
+      {decode_us, {tokens, _cache}} =
+        :timer.tc(fn ->
+          decode_loop(model, [next], cache, n_prompt, max_new - 1, eos)
+        end)
 
-    all_tokens = prompt ++ [next | tokens]
+      all_tokens = prompt ++ [next | tokens]
 
-    stats = %{
-      n_prompt: n_prompt,
-      n_new: length(all_tokens) - n_prompt,
-      prefill_ms: prefill_us / 1000.0,
-      decode_total_ms: decode_us / 1000.0,
-      decode_ms_per_tok:
-        case length(all_tokens) - n_prompt - 1 do
-          0 -> nil
-          n -> decode_us / 1000.0 / n
-        end,
-      prefill_tokens_per_sec: n_prompt * 1.0e6 / max(prefill_us, 1)
-    }
+      stats = %{
+        n_prompt: n_prompt,
+        n_new: length(all_tokens) - n_prompt,
+        prefill_ms: prefill_us / 1000.0,
+        decode_total_ms: decode_us / 1000.0,
+        decode_ms_per_tok:
+          case length(all_tokens) - n_prompt - 1 do
+            0 -> nil
+            n -> decode_us / 1000.0 / n
+          end,
+        prefill_tokens_per_sec: n_prompt * 1.0e6 / max(prefill_us, 1),
+        cpu_temp_c: NxArm.Performance.max_cpu_temp_c()
+      }
 
-    {all_tokens, stats}
+      {all_tokens, stats}
+    end
+
+    if scope_governor? do
+      NxArm.Performance.with_performance(do_generate)
+    else
+      do_generate.()
+    end
   end
 
   defp prefill(model, tokens, cache) do
@@ -476,7 +486,10 @@ defmodule NxArm.Models.Llama do
 
   defp matmul_quant_gemv(x, {:q4_0, q}, n) do
     x_bin = NxArm.Backend.__bin_of__(x)
-    out_bin = NxArm.Native.int4_matmul_gemv_neon_op(x_bin, q.packed, q.scales, n, q.k)
+    # Q4_0×Q8_0 int8 path is ~2-4× faster than the f32 path on
+    # ARMv8.0 cores (FP3 A73). Same precision (Q8_0 acts are well
+    # within f32 noise for these workloads).
+    out_bin = NxArm.Native.int4_matmul_gemv_q4_x_q8_neon_op(x_bin, q.packed, q.scales, n, q.k)
     Nx.from_binary(out_bin, :f32) |> Nx.reshape({1, n}) |> Nx.backend_copy(NxArm.Backend)
   end
 

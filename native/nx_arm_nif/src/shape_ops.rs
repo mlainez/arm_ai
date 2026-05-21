@@ -3629,6 +3629,141 @@ fn f16_bits_to_f32(h: u16) -> f32 {
     }
 }
 
+/// NEON Q4_0 × Q8_0 GEMV (M=1). The fastest kernel in this file
+/// for LLM decode: keeps the inner loop entirely in int8, then
+/// applies the f32 scales once per group of 32 weights.
+///
+/// Why this is faster than `int4_matmul_gemv_neon`:
+///   * NEON `vmull_s8` is 8 lanes/instruction; the previous f32
+///     kernel did 4 lanes per `vfmaq_f32`. 2× theoretical compute.
+///   * No `i8 → i16 → i32 → f32` widening chain per weight — the
+///     i32 accumulator stays compact, scale-multiply happens once
+///     per 32 weights instead of once per weight.
+///   * Activations are quantised once up front (Q8_0 style) and
+///     read in i8 form by every output row — half the BW of f32
+///     activations.
+///
+/// Layout: activations `(K)` f32 in, packed weights `[N, K/2]` u8,
+/// per-group weight scales `[N, K/32]` f32. Output `(N)` f32.
+#[cfg(target_arch = "aarch64")]
+pub fn int4_matmul_gemv_q4_x_q8_neon(
+    a_f32: &[f32],
+    w_packed: &[u8],
+    w_scales: &[f32],
+    n: usize,
+    k: usize,
+) -> Vec<f32> {
+    use core::arch::aarch64::*;
+    use rayon::prelude::*;
+
+    const GROUP: usize = 32;
+    let n_groups = k / GROUP;
+    let bytes_per_row = k / 2;
+
+    // ----- 1) Quantise activations Q8_0 style: per-group scale + i8. -----
+    let mut a_i8 = vec![0i8; k];
+    let mut a_scales = vec![0.0f32; n_groups];
+
+    for g in 0..n_groups {
+        let group = &a_f32[g * GROUP..(g + 1) * GROUP];
+        let mut max_abs = 0.0f32;
+        for &v in group {
+            let av = v.abs();
+            if av > max_abs {
+                max_abs = av;
+            }
+        }
+        let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
+        a_scales[g] = scale;
+        let inv = 1.0 / scale;
+        for i in 0..GROUP {
+            let q = (group[i] * inv).round();
+            a_i8[g * GROUP + i] = q.clamp(-128.0, 127.0) as i8;
+        }
+    }
+
+    // ----- 2) Pre-deinterleave activations into even/odd lanes per
+    // group. Q4_0 packs (k=2i in low nibble, k=2i+1 in high nibble),
+    // so we want the activation vectors organised the same way.
+    let mut a_even = vec![0i8; k / 2]; // a[0], a[2], a[4], ...
+    let mut a_odd = vec![0i8; k / 2];  // a[1], a[3], a[5], ...
+    for g in 0..n_groups {
+        for i in 0..(GROUP / 2) {
+            a_even[g * (GROUP / 2) + i] = a_i8[g * GROUP + 2 * i];
+            a_odd[g * (GROUP / 2) + i] = a_i8[g * GROUP + 2 * i + 1];
+        }
+    }
+
+    let mut out = vec![0.0f32; n];
+
+    // Chunked parallelism: each rayon worker takes a contiguous
+    // block of output rows. `par_iter_mut` over a long N caused
+    // rayon's work-stealing to dominate at 2048 tasks of ~2 µs each.
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk = ((n + n_threads - 1) / n_threads).max(16);
+
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(ci, row_chunk)| {
+            let j0 = ci * chunk;
+
+            for (offset, slot) in row_chunk.iter_mut().enumerate() {
+                let j = j0 + offset;
+                let row_packed = &w_packed[j * bytes_per_row..(j + 1) * bytes_per_row];
+                let row_w_scales = &w_scales[j * n_groups..(j + 1) * n_groups];
+
+                let mut total = 0.0f32;
+
+                for g in 0..n_groups {
+                    let group_packed = &row_packed[g * 16..(g + 1) * 16];
+                    let group_a_even = &a_even[g * 16..(g + 1) * 16];
+                    let group_a_odd = &a_odd[g * 16..(g + 1) * 16];
+                    let w_scale = row_w_scales[g];
+                    let a_scale = a_scales[g];
+
+                    unsafe {
+                        let packed = vld1q_u8(group_packed.as_ptr());
+                        let mask_lo = vdupq_n_u8(0x0F);
+                        let lo_u = vandq_u8(packed, mask_lo);
+                        let hi_u = vshrq_n_u8(packed, 4);
+                        let bias = vdupq_n_s8(-8);
+                        let lo_s8 = vaddq_s8(vreinterpretq_s8_u8(lo_u), bias);
+                        let hi_s8 = vaddq_s8(vreinterpretq_s8_u8(hi_u), bias);
+
+                        let a_e = vld1q_s8(group_a_even.as_ptr());
+                        let a_o = vld1q_s8(group_a_odd.as_ptr());
+
+                        let prod_e_lo = vmull_s8(vget_low_s8(lo_s8), vget_low_s8(a_e));
+                        let prod_e_hi = vmull_high_s8(lo_s8, a_e);
+                        let prod_o_lo = vmull_s8(vget_low_s8(hi_s8), vget_low_s8(a_o));
+                        let prod_o_hi = vmull_high_s8(hi_s8, a_o);
+
+                        let acc_lo = vpaddlq_s16(vaddq_s16(prod_e_lo, prod_o_lo));
+                        let acc_hi = vpaddlq_s16(vaddq_s16(prod_e_hi, prod_o_hi));
+                        let group_dot = vaddvq_s32(vaddq_s32(acc_lo, acc_hi)) as f32;
+
+                        total += group_dot * w_scale * a_scale;
+                    }
+                }
+
+                *slot = total;
+            }
+        });
+
+    out
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn int4_matmul_gemv_q4_x_q8_neon(
+    a_f32: &[f32],
+    w_packed: &[u8],
+    w_scales: &[f32],
+    n: usize,
+    k: usize,
+) -> Vec<f32> {
+    int4_matmul_f32(a_f32, w_packed, w_scales, 1, n, k).unwrap()
+}
+
 /// NEON Q4_0 GEMV: `y = a · W^T` where `a` is f32 (1, K) and `W`
 /// is the GGUF Q4_0 packed-int4 weight (N, K) with one f32 scale
 /// per 32-weight group along K.

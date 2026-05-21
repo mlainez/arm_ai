@@ -1,0 +1,80 @@
+name: Build precompiled NIFs
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_nif:
+    name: "${{ matrix.job.target }} (${{ matrix.job.os }})"
+    runs-on: ${{ matrix.job.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        nif_version: ["2.16", "2.17"]
+        job:
+          # Linux glibc
+          - { target: aarch64-unknown-linux-gnu,        os: ubuntu-22.04, use-cross: true }
+          - { target: armv7-unknown-linux-gnueabihf,    os: ubuntu-22.04, use-cross: true }
+          - { target: x86_64-unknown-linux-gnu,         os: ubuntu-22.04 }
+
+          # Linux musl (Nerves uses musl on some boards)
+          - { target: aarch64-unknown-linux-musl,       os: ubuntu-22.04, use-cross: true }
+          - { target: armv7-unknown-linux-musleabihf,   os: ubuntu-22.04, use-cross: true }
+          - { target: x86_64-unknown-linux-musl,        os: ubuntu-22.04, use-cross: true }
+
+          # macOS (dev box convenience)
+          - { target: x86_64-apple-darwin,              os: macos-13 }
+          - { target: aarch64-apple-darwin,             os: macos-14 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "26"
+          elixir-version: "1.18"
+
+      - name: Extract project metadata
+        id: meta
+        shell: bash
+        run: |
+          PROJECT_VERSION="${GITHUB_REF_NAME#v}"
+          echo "project-version=$PROJECT_VERSION" >> $GITHUB_OUTPUT
+          echo "project-name=nx_arm_nif" >> $GITHUB_OUTPUT
+
+      - name: Build precompiled NIF
+        uses: philss/rustler-precompiled-action@v1.1.4
+        with:
+          project-name: ${{ steps.meta.outputs.project-name }}
+          project-version: ${{ steps.meta.outputs.project-version }}
+          target: ${{ matrix.job.target }}
+          nif-version: ${{ matrix.nif_version }}
+          use-cross: ${{ matrix.job.use-cross }}
+          project-dir: native/nx_arm_nif
+
+      - name: Artifact upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ matrix.job.target }}-${{ matrix.nif_version }}"
+          path: native/nx_arm_nif/*.tar.gz
+
+  release:
+    needs: build_nif
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Publish artifacts to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/*.tar.gz
+          fail_on_unmatched_files: false

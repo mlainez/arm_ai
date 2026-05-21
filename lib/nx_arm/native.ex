@@ -35,9 +35,39 @@ defmodule NxArm.Native do
                    [{"CARGO_TARGET_#{triple_env}_LINKER", cc}]
                end)
 
-  use Rustler,
+  # Production loader: pull a precompiled NIF binary from the release
+  # tarball matched to the runtime triple. Falls back to a local
+  # rustc build when (a) `NX_ARM_BUILD=1` is set, (b) the runtime
+  # triple isn't in the published target list, or (c) the tarball
+  # checksum file isn't present (i.e. building from a git checkout).
+  #
+  # The `:targets` list is the supported deployment matrix; every
+  # entry has a corresponding job in .github/workflows/release.yml.
+  version = Mix.Project.config()[:version]
+
+  force_build? =
+    System.get_env("NX_ARM_BUILD") in ["1", "true"] or
+      not File.exists?(Path.join([__DIR__, "..", "..", "checksum-Elixir.NxArm.Native.exs"]))
+
+  use RustlerPrecompiled,
     otp_app: :nx_arm,
     crate: "nx_arm_nif",
+    base_url: "https://github.com/marclainez/nx_arm/releases/download/v#{version}",
+    version: version,
+    nif_versions: ["2.16", "2.17"],
+    targets: [
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "armv7-unknown-linux-gnueabihf",
+      "armv7-unknown-linux-musleabihf",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin"
+    ],
+    force_build: force_build?,
+    # Nerves cross-build path: when force_build is on and a cross
+    # target is set, forward that to cargo via the local-build path.
     target: @rust_target,
     env: @linker_env
 

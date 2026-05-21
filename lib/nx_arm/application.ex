@@ -9,11 +9,40 @@ defmodule NxArm.Application do
     # Run BEFORE the rayon pool init so any setup that touches the
     # data partition (model load, etc.) sees the grown FS.
     _ = NxArm.StorageResizer.run()
+
+    # First-boot model downloads. Skipped silently when no models
+    # are configured. Runs synchronously so the user's app sees a
+    # ready filesystem before its own start callbacks fire.
+    _ = ensure_models()
+
     auto_init_thread_pool()
     warm_up_dirty_schedulers()
     pin_normal_schedulers_to_efficiency()
     maybe_apply_boot_governor()
     Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
+  end
+
+  defp ensure_models do
+    case Application.get_env(:nx_arm, :models, []) do
+      [] ->
+        :no_models_configured
+
+      _ ->
+        case NxArm.Hub.ensure_all() do
+          {:ok, paths} ->
+            Logger.info("[nx_arm] model hub: #{map_size(paths)} model(s) ready")
+            {:ok, paths}
+
+          {:error, errors} ->
+            for {id, reason} <- errors do
+              Logger.warning("[nx_arm] model hub: #{id} failed: #{inspect(reason)}")
+            end
+
+            {:error, errors}
+        end
+    end
+  rescue
+    e -> Logger.warning("[nx_arm] model hub crashed: #{Exception.message(e)}")
   end
 
   # On big.LITTLE chips, the right partition is:

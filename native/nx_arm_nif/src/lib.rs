@@ -7,6 +7,7 @@
 
 mod conv_int8;
 mod shape_ops;
+mod topology;
 
 use rustler::{Env, NifResult, OwnedBinary, ResourceArc};
 
@@ -1151,6 +1152,38 @@ fn init_thread_pool_op(n: usize) -> rustler::Atom {
         Ok(_) => atoms::ok(),
         Err(_) => atoms::already_initialised(),
     }
+}
+
+/// Auto-detect big.LITTLE topology and pin rayon to the perf cluster.
+/// On homogeneous chips it's a no-op pin (rayon sizes itself normally).
+/// Idempotent: returns :already_initialised if rayon's global pool has
+/// already been touched.
+#[rustler::nif]
+fn init_perf_cluster_op() -> (rustler::Atom, usize, Vec<usize>, String) {
+    let topo = topology::Topology::detect();
+    let perf = topo.perf_cores.clone();
+    let n = perf.len().max(1);
+
+    let pinning_cores = perf.clone();
+    let res = rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .start_handler(move |_idx| {
+            topology::pin_current_thread_to(&pinning_cores);
+        })
+        .build_global();
+
+    let status = match res {
+        Ok(_) => atoms::ok(),
+        Err(_) => atoms::already_initialised(),
+    };
+
+    (status, n, perf, topo.source.to_string())
+}
+
+#[rustler::nif]
+fn detect_topology_op() -> (Vec<usize>, Vec<usize>, String) {
+    let topo = topology::Topology::detect();
+    (topo.perf_cores, topo.all_cores, topo.source.to_string())
 }
 
 #[rustler::nif]

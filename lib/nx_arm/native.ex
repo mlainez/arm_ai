@@ -379,6 +379,24 @@ defmodule NxArm.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Auto-detect big.LITTLE topology and pin rayon to the perf cluster.
+  Returns `{status, n_threads, perf_core_ids, detection_source}`.
+  Status is `:ok` on first call, `:already_initialised` if the pool
+  is already up.
+  """
+  @spec init_perf_cluster_op() :: {:ok | :already_initialised, pos_integer(), [non_neg_integer()], String.t()}
+  def init_perf_cluster_op,
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Inspect detected topology without altering the rayon pool. Returns
+  `{perf_core_ids, all_core_ids, detection_source}`.
+  """
+  @spec detect_topology_op() :: {[non_neg_integer()], [non_neg_integer()], String.t()}
+  def detect_topology_op,
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Quantize an `(N, K)` f32 weight matrix to Q4_0 packed int4 +
   scales. K must be a multiple of 32. Returns `{packed_bin,
   scales_bin}`.

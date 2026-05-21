@@ -23,22 +23,59 @@ defmodule NxArm.Runtime do
   """
 
   @doc """
-  Initialise the rayon thread pool from `Application.get_env(:nx_arm,
-  :thread_count)`. Returns `:ok`, `:already_initialised`, or
-  `:no_config` if no thread_count is set.
-  """
-  @spec init_thread_pool() :: :ok | :already_initialised | :no_config
-  def init_thread_pool do
-    case Application.get_env(:nx_arm, :thread_count) do
-      nil ->
-        :no_config
+  Initialise the rayon thread pool. Default policy: detect
+  big.LITTLE topology and pin to the perf cluster. The generic
+  ARM backend should *always* leverage the best cores first; on
+  homogeneous chips this collapses to the obvious "use everything"
+  case.
 
-      n when is_integer(n) and n > 0 ->
-        NxArm.Native.init_thread_pool_op(n)
+  Override via app config:
+
+      config :nx_arm,
+        thread_pool: :perf_cluster      # default
+      # or
+      config :nx_arm,
+        thread_pool: :all_cores
+      # or
+      config :nx_arm,
+        thread_count: 4                 # explicit count, no pinning
+
+  Returns a tuple describing what was set up:
+
+      {:ok, n_threads, perf_core_ids, source}
+      {:already_initialised, n_threads, perf_core_ids, source}
+      {:no_pinning, n_threads}     # explicit thread_count path
+  """
+  @spec init_thread_pool() ::
+          {:ok | :already_initialised, pos_integer(), [non_neg_integer()], String.t()}
+          | {:no_pinning, pos_integer()}
+  def init_thread_pool do
+    cond do
+      n = Application.get_env(:nx_arm, :thread_count) ->
+        status = NxArm.Native.init_thread_pool_op(n)
+        {status, n}
+
+      Application.get_env(:nx_arm, :thread_pool, :perf_cluster) == :all_cores ->
+        # No pinning: rayon picks default count = logical CPU count.
+        n = NxArm.Native.current_thread_count_op()
+        {:no_pinning, n}
+
+      true ->
+        NxArm.Native.init_perf_cluster_op()
     end
   end
 
   @doc "Active thread count in the rayon pool."
   @spec thread_count() :: pos_integer()
   def thread_count, do: NxArm.Native.current_thread_count_op()
+
+  @doc """
+  Inspect detected big.LITTLE topology. Useful for diagnostics from
+  iex on the device.
+  """
+  @spec topology() :: %{perf_cores: [non_neg_integer()], all_cores: [non_neg_integer()], source: String.t()}
+  def topology do
+    {perf, all, source} = NxArm.Native.detect_topology_op()
+    %{perf_cores: perf, all_cores: all, source: source}
+  end
 end

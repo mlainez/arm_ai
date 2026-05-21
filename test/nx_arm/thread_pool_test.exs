@@ -22,15 +22,31 @@ defmodule NxArm.ThreadPoolTest do
     assert result in [:ok, :already_initialised]
   end
 
-  test "Runtime.init_thread_pool returns :no_config when unset" do
-    prev = Application.get_env(:nx_arm, :thread_count)
+  test "Runtime.init_thread_pool defaults to perf-cluster pinning when no config" do
+    prev_count = Application.get_env(:nx_arm, :thread_count)
+    prev_pool = Application.get_env(:nx_arm, :thread_pool)
     Application.delete_env(:nx_arm, :thread_count)
+    Application.delete_env(:nx_arm, :thread_pool)
 
     try do
-      assert NxArm.Runtime.init_thread_pool() == :no_config
+      result = NxArm.Runtime.init_thread_pool()
+      # Pool is already up from app start, but the shape is the same.
+      assert match?({status, n, perf, _src}
+                     when status in [:ok, :already_initialised] and is_integer(n) and is_list(perf),
+                    result)
     after
-      if prev, do: Application.put_env(:nx_arm, :thread_count, prev)
+      if prev_count, do: Application.put_env(:nx_arm, :thread_count, prev_count)
+      if prev_pool, do: Application.put_env(:nx_arm, :thread_pool, prev_pool)
     end
+  end
+
+  test "Runtime.topology/0 returns perf + all core lists" do
+    topo = NxArm.Runtime.topology()
+    assert is_list(topo.perf_cores)
+    assert is_list(topo.all_cores)
+    assert is_binary(topo.source)
+    # Perf cores ⊆ all cores
+    assert MapSet.subset?(MapSet.new(topo.perf_cores), MapSet.new(topo.all_cores))
   end
 
   test "Runtime.thread_count delegates to NIF" do

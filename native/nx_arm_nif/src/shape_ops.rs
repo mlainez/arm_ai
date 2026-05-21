@@ -1747,48 +1747,70 @@ pub fn quantize_int8_per_token(a: &[f32], m: usize, k: usize) -> Result<(Vec<i8>
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn int8_dot(a: &[i8], w: &[i8], k: usize, use_sdot: bool) -> i32 {
+    if use_sdot {
+        int8_dot_sdot(a, w, k)
+    } else {
+        int8_dot_vmlal(a, w, k)
+    }
+}
+
+// The sdot instruction is part of the ARMv8.2-A `dotprod` extension.
+// Older toolchains (e.g. the cross-toolchain we use to build the
+// Nerves firmware) reject the asm unless this function is compiled
+// with the feature explicitly enabled. The runtime guard at the
+// call site ensures we only enter this path on CPUs that actually
+// have the instruction.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn int8_dot_sdot(a: &[i8], w: &[i8], k: usize) -> i32 {
     use core::arch::aarch64::*;
 
     let mut acc = vdupq_n_s32(0);
     let mut kk = 0;
 
-    if use_sdot {
-        // SDOT path: 16 i8s per iteration, 4 i32 partial sums.
-        while kk + 16 <= k {
-            let av = vld1q_s8(a.as_ptr().add(kk));
-            let wv = vld1q_s8(w.as_ptr().add(kk));
-            // sdot inline asm — NEON intrinsic name is vdotq_s32 but
-            // its availability in stable Rust core::arch is gated. We
-            // emit the instruction directly.
-            core::arch::asm!(
-                "sdot {acc:v}.4s, {a:v}.16b, {w:v}.16b",
-                acc = inout(vreg) acc,
-                a = in(vreg) av,
-                w = in(vreg) wv,
-                options(pure, nomem, nostack, preserves_flags),
-            );
-            kk += 16;
-        }
-    } else {
-        // vmlal_s8 fallback: 8 i8s per iteration, widen→i16 pairs,
-        // then pairwise-add into i32 acc.
-        while kk + 8 <= k {
-            let av = vld1_s8(a.as_ptr().add(kk));
-            let wv = vld1_s8(w.as_ptr().add(kk));
-            let prod = vmull_s8(av, wv);
-            acc = vpadalq_s16(acc, prod);
-            kk += 8;
-        }
+    while kk + 16 <= k {
+        let av = vld1q_s8(a.as_ptr().add(kk));
+        let wv = vld1q_s8(w.as_ptr().add(kk));
+        core::arch::asm!(
+            "sdot {acc:v}.4s, {a:v}.16b, {w:v}.16b",
+            acc = inout(vreg) acc,
+            a = in(vreg) av,
+            w = in(vreg) wv,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+        kk += 16;
     }
 
     let mut total = vaddvq_s32(acc);
-
-    // Scalar tail for k % 16 (or 8).
     while kk < k {
         total += (a[kk] as i32) * (w[kk] as i32);
         kk += 1;
     }
+    total
+}
 
+#[cfg(target_arch = "aarch64")]
+unsafe fn int8_dot_vmlal(a: &[i8], w: &[i8], k: usize) -> i32 {
+    use core::arch::aarch64::*;
+
+    let mut acc = vdupq_n_s32(0);
+    let mut kk = 0;
+
+    // vmlal_s8 fallback: 8 i8s per iteration, widen→i16 pairs,
+    // then pairwise-add into i32 acc.
+    while kk + 8 <= k {
+        let av = vld1_s8(a.as_ptr().add(kk));
+        let wv = vld1_s8(w.as_ptr().add(kk));
+        let prod = vmull_s8(av, wv);
+        acc = vpadalq_s16(acc, prod);
+        kk += 8;
+    }
+
+    let mut total = vaddvq_s32(acc);
+    while kk < k {
+        total += (a[kk] as i32) * (w[kk] as i32);
+        kk += 1;
+    }
     total
 }
 
@@ -1856,14 +1878,20 @@ pub fn dequant_matmul_f16_f32(
             let mut acc = unsafe { vdupq_n_f32(0.0) };
             let mut kk = 0;
 
-            // Process 4 f32 × 4 f16 at a time via vcvt_f32_f16.
+            // Process 4 f32 × 4 f16 at a time. We do the f16→f32
+            // conversion in scalar (the NEON `vcvt_f32_f16` intrinsic
+            // sits behind the unstable `stdarch_neon_f16` feature
+            // gate) and keep the multiply-accumulate vectorised via
+            // vfmaq_f32 — that's where the hot path actually is.
             while kk + 4 <= k {
+                let w_f32_arr = [
+                    f16_to_f32(w_u16[kk]),
+                    f16_to_f32(w_u16[kk + 1]),
+                    f16_to_f32(w_u16[kk + 2]),
+                    f16_to_f32(w_u16[kk + 3]),
+                ];
                 unsafe {
-                    // Load 4 u16 as float16x4_t, convert to f32x4.
-                    let w_u16_vec = vld1_u16(w_u16.as_ptr().add(kk));
-                    let w_f16_vec = vreinterpret_f16_u16(w_u16_vec);
-                    let w_f32_vec = vcvt_f32_f16(w_f16_vec);
-
+                    let w_f32_vec = vld1q_f32(w_f32_arr.as_ptr());
                     let a_vec = vld1q_f32(a.as_ptr().add(kk));
                     acc = vfmaq_f32(acc, a_vec, w_f32_vec);
                 }

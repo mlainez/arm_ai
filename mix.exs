@@ -51,6 +51,9 @@ defmodule NxArm.MixProject do
       # wrappers, which were duplicating these crates).
       {:tokenizers, "~> 0.5"},
       {:safetensors, "~> 0.1"},
+      # CPU governor scoping + big.LITTLE topology — extracted from
+      # nx_arm into its own package since it isn't Nx-specific.
+      {:nerves_cpu, path: "../nerves_cpu"},
       {:axon, "~> 0.7", only: [:test]},
       {:bumblebee, "~> 0.6", only: [:test]},
       {:rustler, "~> 0.36", optional: true},

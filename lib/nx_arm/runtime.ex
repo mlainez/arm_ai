@@ -79,14 +79,5 @@ defmodule NxArm.Runtime do
           all_cores: [non_neg_integer()],
           source: String.t()
         }
-  def topology do
-    if function_exported?(NxArm.Native, :detect_topology_full_op, 0) do
-      {perf, eff, all, source} = NxArm.Native.detect_topology_full_op()
-      %{perf_cores: perf, efficiency_cores: eff, all_cores: all, source: source}
-    else
-      {perf, all, source} = NxArm.Native.detect_topology_op()
-      eff = all -- perf
-      %{perf_cores: perf, efficiency_cores: eff, all_cores: all, source: source}
-    end
-  end
+  def topology, do: NervesCPU.Topology.detect()
 end

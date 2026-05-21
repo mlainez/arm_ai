@@ -1067,6 +1067,32 @@ unsafe fn matmul_kernel_4x4(
 fn matmul_2d_neon_qkt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     let c_addr = c.as_mut_ptr() as usize;
 
+    // For M < 4 the M-axis parallelism leaves cores idle — LLM
+    // decode hits M=1 every token. Split along N instead so the
+    // perf-cluster threads each take a chunk of the output columns.
+    if m < 4 {
+        let n_threads = rayon::current_num_threads();
+        let chunk = ((n + n_threads - 1) / n_threads).max(8);
+
+        (0..n).into_par_iter().step_by(chunk).for_each(|col_start| {
+            let col_end = (col_start + chunk).min(n);
+            let c_ptr = c_addr as *mut f32;
+
+            unsafe {
+                for row in 0..m {
+                    let a_row = a.as_ptr().add(row * k);
+                    for col in col_start..col_end {
+                        let b_row = b.as_ptr().add(col * k);
+                        let acc = dot4_neon(a_row, b_row, k);
+                        *c_ptr.add(row * n + col) = acc;
+                    }
+                }
+            }
+        });
+
+        return;
+    }
+
     (0..m).into_par_iter().for_each(|row| {
         let c_ptr = c_addr as *mut f32;
         unsafe {
@@ -1080,26 +1106,47 @@ fn matmul_2d_neon_qkt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k
     });
 }
 
-/// 4-wide NEON dot product of two length-K f32 arrays. Tail handled
-/// scalar.
+/// Unrolled 16-wide NEON dot product of two length-K f32 arrays.
+/// Four independent accumulators expose the two NEON pipes; the
+/// previous single-acc variant left ~half the FMA throughput on the
+/// table. Tail handled scalar.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn dot4_neon(a: *const f32, b: *const f32, k: usize) -> f32 {
     use core::arch::aarch64::*;
 
-    let mut acc = vdupq_n_f32(0.0);
-    let k_tiles = k / 4;
-    let k_tail_start = k_tiles * 4;
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
 
-    for kk in 0..k_tiles {
-        let av = vld1q_f32(a.add(kk * 4));
-        let bv = vld1q_f32(b.add(kk * 4));
-        acc = vfmaq_f32(acc, av, bv);
+    let mut kk = 0;
+    while kk + 16 <= k {
+        let a0 = vld1q_f32(a.add(kk));
+        let a1 = vld1q_f32(a.add(kk + 4));
+        let a2 = vld1q_f32(a.add(kk + 8));
+        let a3 = vld1q_f32(a.add(kk + 12));
+        let b0 = vld1q_f32(b.add(kk));
+        let b1 = vld1q_f32(b.add(kk + 4));
+        let b2 = vld1q_f32(b.add(kk + 8));
+        let b3 = vld1q_f32(b.add(kk + 12));
+        acc0 = vfmaq_f32(acc0, a0, b0);
+        acc1 = vfmaq_f32(acc1, a1, b1);
+        acc2 = vfmaq_f32(acc2, a2, b2);
+        acc3 = vfmaq_f32(acc3, a3, b3);
+        kk += 16;
+    }
+    while kk + 4 <= k {
+        let av = vld1q_f32(a.add(kk));
+        let bv = vld1q_f32(b.add(kk));
+        acc0 = vfmaq_f32(acc0, av, bv);
+        kk += 4;
     }
 
-    let mut sum = vaddvq_f32(acc);
-    for kk in k_tail_start..k {
+    let mut sum = vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
+    while kk < k {
         sum += *a.add(kk) * *b.add(kk);
+        kk += 1;
     }
     sum
 }

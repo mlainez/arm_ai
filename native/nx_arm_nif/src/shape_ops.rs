@@ -3537,6 +3537,66 @@ pub fn silu_gate_mul_up_f32(gate: &[f32], up: &[f32], out: &mut [f32]) {
     });
 }
 
+/// Dequantize one row of a GGML Q4_0 tensor to f32. Used for
+/// embedding-table lookups when the token_embd tensor is stored
+/// as Q4_0 (TinyLlama 1.1B Chat ships it this way).
+///
+/// Layout: `packed` is `[N, K/2]` row-major u8 (low nibble = even k);
+/// `scales` is `[N, K/32]` f32 LE. Decoded row is K f32 values.
+pub fn q4_0_dequant_row_f32(
+    packed: &[u8],
+    scales: &[f32],
+    row: usize,
+    k: usize,
+    out: &mut [f32],
+) {
+    const GROUP: usize = 32;
+    let n_groups = k / GROUP;
+    let bytes_per_row = k / 2;
+    debug_assert_eq!(out.len(), k);
+
+    let row_packed = &packed[row * bytes_per_row..(row + 1) * bytes_per_row];
+    let row_scales = &scales[row * n_groups..(row + 1) * n_groups];
+
+    for g in 0..n_groups {
+        let scale = row_scales[g];
+        let group_bytes = &row_packed[g * (GROUP / 2)..(g + 1) * (GROUP / 2)];
+        let out_group = &mut out[g * GROUP..(g + 1) * GROUP];
+
+        for j in 0..(GROUP / 2) {
+            let byte = group_bytes[j];
+            let lo = (byte & 0x0F) as i32 - 8;
+            let hi = ((byte >> 4) & 0x0F) as i32 - 8;
+            out_group[2 * j] = (lo as f32) * scale;
+            out_group[2 * j + 1] = (hi as f32) * scale;
+        }
+    }
+}
+
+/// Dequantize one row of a GGML Q8_0 tensor to f32. Same use case
+/// as `q4_0_dequant_row_f32` for Q8_0 embedding tables (SmolLM2).
+pub fn q8_0_dequant_row_f32(
+    weights: &[i8],
+    scales: &[f32],
+    row: usize,
+    k: usize,
+    out: &mut [f32],
+) {
+    const GROUP: usize = 32;
+    let n_groups = k / GROUP;
+    debug_assert_eq!(out.len(), k);
+
+    let row_w = &weights[row * k..(row + 1) * k];
+    let row_s = &scales[row * n_groups..(row + 1) * n_groups];
+
+    for g in 0..n_groups {
+        let scale = row_s[g];
+        for i in 0..GROUP {
+            out[g * GROUP + i] = (row_w[g * GROUP + i] as f32) * scale;
+        }
+    }
+}
+
 /// Dequantize a GGML Q6_K tensor to f32 in place.
 ///
 /// Block layout (one super-block = 256 weights, 210 bytes):

@@ -29,6 +29,9 @@ use std::fs;
 pub struct Topology {
     /// CPU IDs belonging to the highest-capacity cluster.
     pub perf_cores: Vec<usize>,
+    /// CPU IDs in lower-capacity (efficiency) clusters. For
+    /// homogeneous chips this is empty and `perf_cores == all_cores`.
+    pub efficiency_cores: Vec<usize>,
     /// All known CPU IDs, lowest-first.
     pub all_cores: Vec<usize>,
     /// How we figured it out (for logging/diagnostics).
@@ -53,6 +56,7 @@ impl Topology {
 
         Topology {
             perf_cores: all_cores.clone(),
+            efficiency_cores: Vec::new(),
             all_cores,
             source: "fallback (homogeneous or detection failed)",
         }
@@ -105,8 +109,11 @@ fn detect_by_capacity(cpus: &[usize]) -> Option<Topology> {
         caps.insert(id, v);
     }
     let perf = group_max(&caps)?;
+    let perf_set: std::collections::HashSet<usize> = perf.iter().copied().collect();
+    let efficiency: Vec<usize> = cpus.iter().copied().filter(|c| !perf_set.contains(c)).collect();
     Some(Topology {
         perf_cores: perf,
+        efficiency_cores: efficiency,
         all_cores: cpus.to_vec(),
         source: "cpu_capacity",
     })
@@ -122,8 +129,11 @@ fn detect_by_max_freq(cpus: &[usize]) -> Option<Topology> {
         freqs.insert(id, v);
     }
     let perf = group_max(&freqs)?;
+    let perf_set: std::collections::HashSet<usize> = perf.iter().copied().collect();
+    let efficiency: Vec<usize> = cpus.iter().copied().filter(|c| !perf_set.contains(c)).collect();
     Some(Topology {
         perf_cores: perf,
+        efficiency_cores: efficiency,
         all_cores: cpus.to_vec(),
         source: "cpufreq.cpuinfo_max_freq",
     })
@@ -182,8 +192,11 @@ fn detect_by_midr(cpus: &[usize]) -> Option<Topology> {
         scores.insert(id, part_score(v));
     }
     let perf = group_max(&scores)?;
+    let perf_set: std::collections::HashSet<usize> = perf.iter().copied().collect();
+    let efficiency: Vec<usize> = cpus.iter().copied().filter(|c| !perf_set.contains(c)).collect();
     Some(Topology {
         perf_cores: perf,
+        efficiency_cores: efficiency,
         all_cores: cpus.to_vec(),
         source: "midr_el1 part-number table",
     })

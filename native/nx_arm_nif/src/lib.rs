@@ -334,6 +334,51 @@ fn dequantize_q6_k_op<'a>(
     f32_vec_to_bin(env, &out)
 }
 
+/// Dequantize one Q4_0 row to f32 — fast embedding-table lookup.
+#[rustler::nif]
+fn q4_0_dequant_row_op<'a>(
+    env: Env<'a>,
+    packed: rustler::Binary<'a>,
+    scales: rustler::Binary<'a>,
+    row: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let scales_f: &[f32] = unsafe {
+        std::slice::from_raw_parts(scales.as_ptr() as *const f32, scales.as_slice().len() / 4)
+    };
+    let mut out_bin = OwnedBinary::new(k * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let dst: &mut [f32] = unsafe {
+        std::slice::from_raw_parts_mut(out_bin.as_mut_slice().as_mut_ptr() as *mut f32, k)
+    };
+    shape_ops::q4_0_dequant_row_f32(packed.as_slice(), scales_f, row, k, dst);
+    Ok(out_bin.release(env))
+}
+
+/// Dequantize one Q8_0 row to f32 — fast embedding-table lookup.
+#[rustler::nif]
+fn q8_0_dequant_row_op<'a>(
+    env: Env<'a>,
+    weights: rustler::Binary<'a>,
+    scales: rustler::Binary<'a>,
+    row: usize,
+    k: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let w_i8: &[i8] = unsafe {
+        std::slice::from_raw_parts(weights.as_ptr() as *const i8, weights.as_slice().len())
+    };
+    let scales_f: &[f32] = unsafe {
+        std::slice::from_raw_parts(scales.as_ptr() as *const f32, scales.as_slice().len() / 4)
+    };
+    let mut out_bin = OwnedBinary::new(k * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    let dst: &mut [f32] = unsafe {
+        std::slice::from_raw_parts_mut(out_bin.as_mut_slice().as_mut_ptr() as *mut f32, k)
+    };
+    shape_ops::q8_0_dequant_row_f32(w_i8, scales_f, row, k, dst);
+    Ok(out_bin.release(env))
+}
+
 /// NEON Q4_0 × Q8_0 GEMV (M=1, dotprod-free). Best path for LLM
 /// decode-time matmuls on A73 / generic ARMv8.0+ ARM cores.
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -1308,6 +1353,26 @@ fn pin_calling_thread_op() -> rustler::Atom {
 fn detect_topology_op() -> (Vec<usize>, Vec<usize>, String) {
     let topo = topology::Topology::detect();
     (topo.perf_cores, topo.all_cores, topo.source.to_string())
+}
+
+#[rustler::nif]
+fn detect_topology_full_op() -> (Vec<usize>, Vec<usize>, Vec<usize>, String) {
+    let topo = topology::Topology::detect();
+    (
+        topo.perf_cores,
+        topo.efficiency_cores,
+        topo.all_cores,
+        topo.source.to_string(),
+    )
+}
+
+/// Pin the *calling thread* to the given list of CPUs. Used by
+/// startup hooks to migrate BEAM normal-scheduler threads off the
+/// perf cluster so the perf cores stay reserved for compute NIFs.
+#[rustler::nif]
+fn pin_thread_to_cores_op(cores: Vec<usize>) -> rustler::Atom {
+    topology::pin_current_thread_to(&cores);
+    atoms::ok()
 }
 
 #[rustler::nif]

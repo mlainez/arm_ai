@@ -11,8 +11,59 @@ defmodule NxArm.Application do
     _ = NxArm.StorageResizer.run()
     auto_init_thread_pool()
     warm_up_dirty_schedulers()
+    pin_normal_schedulers_to_efficiency()
     maybe_apply_boot_governor()
     Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
+  end
+
+  # On big.LITTLE chips, the right partition is:
+  #   * perf cluster      → rayon pool + BEAM dirty CPU schedulers
+  #     (these run our heavy NEON compute NIFs)
+  #   * efficiency cluster → BEAM normal schedulers
+  #     (Elixir glue code, GC, message-passing — latency-sensitive
+  #     but not compute-hungry)
+  #
+  # rayon + dirty CPU schedulers are already pinned to the perf
+  # cluster (see auto_init_thread_pool + warm_up_dirty_schedulers).
+  # Here we migrate the BEAM normal-scheduler threads to the
+  # efficiency cluster so they don't share L1/L2 with the NEON
+  # workers.
+  defp pin_normal_schedulers_to_efficiency do
+    if not function_exported?(NxArm.Native, :pin_thread_to_cores_op, 1) do
+      :skip
+    else
+      eff =
+        case NxArm.Runtime.topology() do
+          %{efficiency_cores: c} when is_list(c) and c != [] -> c
+          _ -> []
+        end
+
+      if eff == [] do
+        :no_efficiency_cluster
+      else
+        # Spawn one task per normal scheduler — each runs on a
+        # different scheduler thread, pins itself to the eff cluster.
+        n = :erlang.system_info(:schedulers_online)
+
+        tasks =
+          for sched_id <- 1..n do
+            Task.async(fn ->
+              # Bias this lightweight task toward the matching scheduler.
+              :erlang.process_flag(:scheduler, sched_id)
+              NxArm.Native.pin_thread_to_cores_op(eff)
+            end)
+          end
+
+        _ = Task.await_many(tasks, 5_000)
+        Logger.info(
+          "[nx_arm] BEAM normal schedulers (#{n}) migrated to efficiency cluster #{inspect(eff)}"
+        )
+      end
+    end
+  rescue
+    e -> Logger.warning("[nx_arm] normal-scheduler pinning failed: #{Exception.message(e)}")
+  catch
+    _, _ -> :ok
   end
 
   # By default we do NOT pin CPUs to `performance` at boot —

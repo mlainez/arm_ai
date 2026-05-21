@@ -404,6 +404,16 @@ defmodule NxArm.Native do
   def silu_gate_mul_up_f32_op(_gate, _up),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "Fast Q4_0 row dequant for embedding-table lookups."
+  @spec q4_0_dequant_row_op(binary(), binary(), non_neg_integer(), pos_integer()) :: binary()
+  def q4_0_dequant_row_op(_packed, _scales, _row, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Fast Q8_0 row dequant for embedding-table lookups."
+  @spec q8_0_dequant_row_op(binary(), binary(), non_neg_integer(), pos_integer()) :: binary()
+  def q8_0_dequant_row_op(_weights, _scales, _row, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   @doc """
   Int8 matmul with per-token activation scales. `act_scales` is a
   length-M f32 LE binary -- one scale per row of A. Equivalent to
@@ -472,6 +482,23 @@ defmodule NxArm.Native do
   """
   @spec detect_topology_op() :: {[non_neg_integer()], [non_neg_integer()], String.t()}
   def detect_topology_op,
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Full topology: `{perf_cores, efficiency_cores, all_cores, source}`.
+  On homogeneous chips `efficiency_cores` is empty.
+  """
+  @spec detect_topology_full_op() ::
+          {[non_neg_integer()], [non_neg_integer()], [non_neg_integer()], String.t()}
+  def detect_topology_full_op,
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Pin the calling OS thread to the given list of CPUs via
+  sched_setaffinity. Best-effort: returns :ok regardless.
+  """
+  @spec pin_thread_to_cores_op([non_neg_integer()]) :: :ok
+  def pin_thread_to_cores_op(_cores),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """

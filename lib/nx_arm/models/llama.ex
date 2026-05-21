@@ -284,7 +284,7 @@ defmodule NxArm.Models.Llama do
       {:q8_0, q} ->
         rows =
           for tok <- token_ids do
-            row_bin = GGUF.q8_0_dequant_row(q, tok)
+            row_bin = NxArm.Native.q8_0_dequant_row_op(q.weights, q.scales, tok, q.k)
             Nx.from_binary(row_bin, :f32) |> Nx.reshape({1, d}) |> Nx.backend_copy(NxArm.Backend)
           end
 
@@ -296,7 +296,7 @@ defmodule NxArm.Models.Llama do
       {:q4_0, q} ->
         rows =
           for tok <- token_ids do
-            row_bin = GGUF.q4_0_dequant_row(q, tok)
+            row_bin = NxArm.Native.q4_0_dequant_row_op(q.packed, q.scales, tok, q.k)
             Nx.from_binary(row_bin, :f32) |> Nx.reshape({1, d}) |> Nx.backend_copy(NxArm.Backend)
           end
 

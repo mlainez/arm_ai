@@ -1,12 +1,21 @@
 #!/usr/bin/env elixir
 
 # ---------------------------------------------------------------
-# Example 04 — Object detection with YOLO.
-# Loads a YOLOv8n / YOLOv5n ONNX export and runs detection on a JPEG.
+# Example 04 — Still-image object detection with YOLOv5n.
+#
+# Snapshot in, JSON detections out. Optimised for capture-and-
+# analyse workflows (kiosk, inventory scan, snapshot-triggered
+# security, wildlife cam-trap) where ~1 s of latency per image
+# is acceptable and the 640×640 fp32 accuracy is worth keeping.
+#
+# Why YOLOv5n (vs v8): the official Ultralytics release ships at
+# opset 17 with `Resize`, so it loads cleanly into tract-onnx with
+# no extra conversion step. It's also ~3× smaller (3.8 MB) and a
+# bit faster on CPU.
 # ---------------------------------------------------------------
 
 image_path = "/root/sample.jpg"
-model_path = "/root/models/yolov8n.onnx"
+model_path = "/root/models/yolov5n.onnx"
 
 unless File.exists?(model_path) and File.exists?(image_path) do
   IO.puts("Missing #{model_path} or #{image_path}.")
@@ -14,15 +23,15 @@ unless File.exists?(model_path) and File.exists?(image_path) do
   System.halt(1)
 end
 
-IO.puts("Loading YOLO model...")
-{:ok, yolo} = NxArm.Models.YOLO.load(model_path, layout: :v8, input_shape: {640, 640})
+IO.puts("Loading YOLOv5n...")
+{:ok, yolo} = NxArm.Models.YOLO.load(model_path, layout: :v5, input_shape: {640, 640})
 
 IO.puts("Preprocessing image...")
 input =
   NxArm.Vision.load_for_classifier(image_path,
     size: {640, 640},
     layout: :nchw,
-    # YOLO ONNX typically expects 0-1 normalised RGB (no ImageNet mean/std).
+    # YOLO expects 0-1 normalised RGB (no ImageNet mean/std).
     mean: {0.0, 0.0, 0.0},
     std: {1.0, 1.0, 1.0}
   )

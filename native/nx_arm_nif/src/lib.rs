@@ -6,6 +6,7 @@
 // and dispatches each Nx callback to one of these.
 
 mod conv_int8;
+mod ops;
 mod shape_ops;
 mod topology;
 
@@ -1224,6 +1225,160 @@ fn mmap_slice_op<'a>(
         ))));
     }
     bytes_to_bin(env, &bytes[offset..offset + len])
+}
+
+// ---------------------------------------------------------------
+// Production-readiness ops: argmax/argmin, select, as_type, clip,
+// pad, gather, stack. Each replaces a fallback path.
+// ---------------------------------------------------------------
+
+#[rustler::nif]
+fn argmax_axis_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    outer: usize,
+    inner: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let mut out_bin = OwnedBinary::new(outer * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::argmax_axis_f32(input.as_slice(), out_bin.as_mut_slice(), outer, inner);
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn argmin_axis_f32_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    outer: usize,
+    inner: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let mut out_bin = OwnedBinary::new(outer * 4)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::argmin_axis_f32(input.as_slice(), out_bin.as_mut_slice(), outer, inner);
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn select_op<'a>(
+    env: Env<'a>,
+    pred: rustler::Binary<'a>,
+    on_true: rustler::Binary<'a>,
+    on_false: rustler::Binary<'a>,
+    elem_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let n = pred.as_slice().len();
+    let mut out_bin = OwnedBinary::new(n * elem_size)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::select_same_shape(
+        pred.as_slice(),
+        on_true.as_slice(),
+        on_false.as_slice(),
+        out_bin.as_mut_slice(),
+        elem_size,
+    );
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn as_type_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    src_dtype: u8,
+    dst_dtype: u8,
+    n_elems: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let src_dt = ops::Dtype::from_u8(src_dtype)
+        .ok_or_else(|| rustler::Error::Term(Box::new(format!("bad src dtype {}", src_dtype))))?;
+    let dst_dt = ops::Dtype::from_u8(dst_dtype)
+        .ok_or_else(|| rustler::Error::Term(Box::new(format!("bad dst dtype {}", dst_dtype))))?;
+
+    let mut out_bin = OwnedBinary::new(n_elems * dst_dt.size())
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::as_type(input.as_slice(), out_bin.as_mut_slice(), src_dt, dst_dt)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn clip_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    dtype: u8,
+    min: f64,
+    max: f64,
+) -> NifResult<rustler::Binary<'a>> {
+    let dt = ops::Dtype::from_u8(dtype)
+        .ok_or_else(|| rustler::Error::Term(Box::new(format!("bad dtype {}", dtype))))?;
+
+    let mut out_bin = OwnedBinary::new(input.as_slice().len())
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::clip(input.as_slice(), out_bin.as_mut_slice(), dt, min, max)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn pad_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    in_shape: Vec<usize>,
+    out_shape: Vec<usize>,
+    pad_config: Vec<(i64, i64, i64)>,
+    fill: rustler::Binary<'a>,
+    elem_size: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let n_out: usize = out_shape.iter().product();
+    let mut out_bin = OwnedBinary::new(n_out * elem_size)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::pad(
+        input.as_slice(),
+        out_bin.as_mut_slice(),
+        &in_shape,
+        &out_shape,
+        &pad_config,
+        fill.as_slice(),
+        elem_size,
+    );
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn gather_axis0_op<'a>(
+    env: Env<'a>,
+    input: rustler::Binary<'a>,
+    indices: rustler::Binary<'a>,
+    n_rows: usize,
+    row_bytes: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let idx_bytes = indices.as_slice();
+    let idx_slice: &[i64] = unsafe {
+        std::slice::from_raw_parts(idx_bytes.as_ptr() as *const i64, idx_bytes.len() / 8)
+    };
+
+    let mut out_bin = OwnedBinary::new(idx_slice.len() * row_bytes)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::gather_axis0(
+        input.as_slice(),
+        idx_slice,
+        out_bin.as_mut_slice(),
+        n_rows,
+        row_bytes,
+    )
+    .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    Ok(out_bin.release(env))
+}
+
+#[rustler::nif]
+fn stack_axis0_op<'a>(
+    env: Env<'a>,
+    tensors: Vec<rustler::Binary<'a>>,
+    tensor_bytes: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let slices: Vec<&[u8]> = tensors.iter().map(|t| t.as_slice()).collect();
+    let mut out_bin = OwnedBinary::new(tensors.len() * tensor_bytes)
+        .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
+    ops::stack_axis0(&slices, out_bin.as_mut_slice(), tensor_bytes);
+    Ok(out_bin.release(env))
 }
 
 fn load(env: Env, _info: rustler::Term) -> bool {

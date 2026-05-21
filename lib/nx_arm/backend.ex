@@ -113,7 +113,17 @@ defmodule NxArm.Backend do
     if Nx.type(out) == Nx.type(tensor) do
       put_in(out.data, tensor.data)
     else
-      fallback(:as_type, [out, tensor])
+      try do
+        src_dt = dtype_code(Nx.type(tensor))
+        dst_dt = dtype_code(Nx.type(out))
+        n = Nx.size(tensor)
+        out_bin = NxArm.Native.as_type_op(bin_of(tensor), src_dt, dst_dt, n)
+        put_in(out.data, %__MODULE__{bin: out_bin})
+      rescue
+        _ -> fallback(:as_type, [out, tensor])
+      catch
+        :error, _ -> fallback(:as_type, [out, tensor])
+      end
     end
   end
 
@@ -682,14 +692,59 @@ defmodule NxArm.Backend do
   end
 
   @impl true
-  def pad(out, tensor, pad_value, padding_config),
-    do: fallback(:pad, [out, tensor, pad_value, padding_config])
+  def pad(out, tensor, pad_value, padding_config) do
+    try do
+      in_shape = Nx.shape(tensor) |> Tuple.to_list()
+      out_shape = Nx.shape(out) |> Tuple.to_list()
+      esize = element_size(Nx.type(tensor))
+      fill = bin_of(pad_value)
+
+      if byte_size(fill) != esize do
+        fallback(:pad, [out, tensor, pad_value, padding_config])
+      else
+        out_bin =
+          NxArm.Native.pad_op(
+            bin_of(tensor),
+            in_shape,
+            out_shape,
+            padding_config,
+            fill,
+            esize
+          )
+
+        put_in(out.data, %__MODULE__{bin: out_bin})
+      end
+    rescue
+      _ -> fallback(:pad, [out, tensor, pad_value, padding_config])
+    catch
+      :error, _ -> fallback(:pad, [out, tensor, pad_value, padding_config])
+    end
+  end
 
   @impl true
   def reverse(out, tensor, axes), do: fallback(:reverse, [out, tensor, axes])
 
   @impl true
-  def clip(out, tensor, min, max), do: fallback(:clip, [out, tensor, min, max])
+  def clip(out, tensor, min, max) do
+    type = Nx.type(tensor)
+
+    cond do
+      not match?({k, _} when k in [:f, :s, :u], type) ->
+        fallback(:clip, [out, tensor, min, max])
+
+      true ->
+        try do
+          min_f = to_f32_scalar(min)
+          max_f = to_f32_scalar(max)
+          out_bin = NxArm.Native.clip_op(bin_of(tensor), dtype_code(type), min_f * 1.0, max_f * 1.0)
+          put_in(out.data, %__MODULE__{bin: out_bin})
+        rescue
+          _ -> fallback(:clip, [out, tensor, min, max])
+        catch
+          :error, _ -> fallback(:clip, [out, tensor, min, max])
+        end
+    end
+  end
 
   @impl true
   def slice(out, tensor, starts, lengths, strides) do
@@ -763,11 +818,63 @@ defmodule NxArm.Backend do
   end
 
   @impl true
-  def stack(out, tensors, axis), do: fallback(:stack, [out, tensors, axis])
+  def stack(out, tensors, axis) do
+    cond do
+      axis != 0 ->
+        fallback(:stack, [out, tensors, axis])
+
+      tensors == [] ->
+        fallback(:stack, [out, tensors, axis])
+
+      true ->
+        first = hd(tensors)
+        first_type = Nx.type(first)
+        first_shape = Nx.shape(first)
+
+        compatible? =
+          Enum.all?(tensors, fn t ->
+            Nx.type(t) == first_type and Nx.shape(t) == first_shape
+          end)
+
+        if not compatible? do
+          fallback(:stack, [out, tensors, axis])
+        else
+          try do
+            tensor_bytes = byte_size(bin_of(first))
+            bins = Enum.map(tensors, &bin_of/1)
+            out_bin = NxArm.Native.stack_axis0_op(bins, tensor_bytes)
+            put_in(out.data, %__MODULE__{bin: out_bin})
+          rescue
+            _ -> fallback(:stack, [out, tensors, axis])
+          catch
+            :error, _ -> fallback(:stack, [out, tensors, axis])
+          end
+        end
+    end
+  end
 
   @impl true
-  def select(out, pred, on_true, on_false),
-    do: fallback(:select, [out, pred, on_true, on_false])
+  def select(out, pred, on_true, on_false) do
+    pred_shape = Nx.shape(pred)
+    t_shape = Nx.shape(on_true)
+    f_shape = Nx.shape(on_false)
+
+    if pred_shape == t_shape and pred_shape == f_shape and
+         Nx.type(on_true) == Nx.type(on_false) do
+      try do
+        pred_bytes = pred_to_bytes(pred)
+        esize = element_size(Nx.type(on_true))
+        out_bin = NxArm.Native.select_op(pred_bytes, bin_of(on_true), bin_of(on_false), esize)
+        put_in(out.data, %__MODULE__{bin: out_bin})
+      rescue
+        _ -> fallback(:select, [out, pred, on_true, on_false])
+      catch
+        :error, _ -> fallback(:select, [out, pred, on_true, on_false])
+      end
+    else
+      fallback(:select, [out, pred, on_true, on_false])
+    end
+  end
 
   @impl true
   def all(out, tensor, opts), do: fallback(:all, [out, tensor, opts])
@@ -779,10 +886,56 @@ defmodule NxArm.Backend do
   def product(out, tensor, opts), do: fallback(:product, [out, tensor, opts])
 
   @impl true
-  def argmax(out, tensor, opts), do: fallback(:argmax, [out, tensor, opts])
+  def argmax(out, tensor, opts), do: do_argmax_argmin(out, tensor, opts, :max)
 
   @impl true
-  def argmin(out, tensor, opts), do: fallback(:argmin, [out, tensor, opts])
+  def argmin(out, tensor, opts), do: do_argmax_argmin(out, tensor, opts, :min)
+
+  defp do_argmax_argmin(out, tensor, opts, which) do
+    type = Nx.type(tensor)
+    shape = Nx.shape(tensor) |> Tuple.to_list()
+    rank = length(shape)
+    axis = opts[:axis]
+    tie_break = opts[:tie_break] || :low
+
+    cond do
+      type != {:f, 32} ->
+        fallback_name = if which == :max, do: :argmax, else: :argmin
+        fallback(fallback_name, [out, tensor, opts])
+
+      tie_break != :low ->
+        fallback_name = if which == :max, do: :argmax, else: :argmin
+        fallback(fallback_name, [out, tensor, opts])
+
+      axis == nil or axis == rank - 1 or axis == -1 ->
+        # Reduce over the last (or only) axis.
+        inner = if rank == 0, do: 1, else: List.last(shape)
+        outer = if rank == 0, do: 1, else: div(Nx.size(tensor), inner)
+
+        try do
+          out_bin =
+            case which do
+              :max -> NxArm.Native.argmax_axis_f32_op(bin_of(tensor), outer, inner)
+              :min -> NxArm.Native.argmin_axis_f32_op(bin_of(tensor), outer, inner)
+            end
+
+          # Result type is s64 per Nx convention.
+          put_in(out.data, %__MODULE__{bin: out_bin})
+        rescue
+          _ ->
+            fallback_name = if which == :max, do: :argmax, else: :argmin
+            fallback(fallback_name, [out, tensor, opts])
+        catch
+          :error, _ ->
+            fallback_name = if which == :max, do: :argmax, else: :argmin
+            fallback(fallback_name, [out, tensor, opts])
+        end
+
+      true ->
+        fallback_name = if which == :max, do: :argmax, else: :argmin
+        fallback(fallback_name, [out, tensor, opts])
+    end
+  end
 
   @impl true
   def reduce(out, tensor, acc, opts, fun),
@@ -956,6 +1109,34 @@ defmodule NxArm.Backend do
 
   defp element_size({_kind, bits}) when rem(bits, 8) == 0, do: div(bits, 8)
   defp element_size({:bf, 16}), do: 2
+
+  defp dtype_code({:f, 32}), do: 0
+  defp dtype_code({:f, 64}), do: 1
+  defp dtype_code({:s, 8}),  do: 2
+  defp dtype_code({:s, 16}), do: 3
+  defp dtype_code({:s, 32}), do: 4
+  defp dtype_code({:s, 64}), do: 5
+  defp dtype_code({:u, 8}),  do: 6
+  defp dtype_code({:u, 16}), do: 7
+  defp dtype_code({:u, 32}), do: 8
+  defp dtype_code({:u, 64}), do: 9
+  defp dtype_code({:bf, 16}), do: 10
+  defp dtype_code({:f, 16}), do: 11
+
+  defp pred_to_bytes(%Nx.Tensor{} = pred) do
+    case Nx.type(pred) do
+      {:u, 8} -> bin_of(pred)
+      {:s, 8} -> bin_of(pred)
+      _ ->
+        # Promote any predicate to {:u, 8} bytes via NIF as_type.
+        n = Nx.size(pred)
+        NxArm.Native.as_type_op(bin_of(pred), dtype_code(Nx.type(pred)), 6, n)
+    end
+  end
+
+  defp scalar_to_bin(value, type) do
+    Nx.tensor(value, type: type) |> Nx.to_binary()
+  end
 
   defp to_f32_scalar(%Nx.Tensor{} = t) do
     bin = bin_of(t)

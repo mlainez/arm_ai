@@ -396,6 +396,46 @@ defmodule NxArm.Native do
   def detect_topology_op,
     do: :erlang.nif_error(:nif_not_loaded)
 
+  # -------------------------------------------------------------
+  # Production-readiness ops: replace BinaryBackend fallbacks for
+  # argmax/argmin, select, as_type, clip, pad, gather, stack.
+  # Dtype codes (matches Rust ops::Dtype):
+  #   0=f32, 1=f64, 2=s8, 3=s16, 4=s32, 5=s64, 6=u8, 7=u16, 8=u32,
+  #   9=u64, 10=bf16, 11=f16, 12=bool
+  # -------------------------------------------------------------
+
+  @spec argmax_axis_f32_op(binary(), non_neg_integer(), non_neg_integer()) :: binary()
+  def argmax_axis_f32_op(_input, _outer, _inner),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec argmin_axis_f32_op(binary(), non_neg_integer(), non_neg_integer()) :: binary()
+  def argmin_axis_f32_op(_input, _outer, _inner),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec select_op(binary(), binary(), binary(), pos_integer()) :: binary()
+  def select_op(_pred, _on_true, _on_false, _elem_size),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec as_type_op(binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  def as_type_op(_input, _src_dtype, _dst_dtype, _n_elems),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec clip_op(binary(), non_neg_integer(), float(), float()) :: binary()
+  def clip_op(_input, _dtype, _min, _max),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec pad_op(binary(), [non_neg_integer()], [non_neg_integer()], [{integer(), integer(), integer()}], binary(), pos_integer()) :: binary()
+  def pad_op(_input, _in_shape, _out_shape, _pad_config, _fill, _elem_size),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec gather_axis0_op(binary(), binary(), pos_integer(), pos_integer()) :: binary()
+  def gather_axis0_op(_input, _indices, _n_rows, _row_bytes),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec stack_axis0_op([binary()], pos_integer()) :: binary()
+  def stack_axis0_op(_tensors, _tensor_bytes),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   @doc """
   Quantize an `(N, K)` f32 weight matrix to Q4_0 packed int4 +
   scales. K must be a multiple of 32. Returns `{packed_bin,

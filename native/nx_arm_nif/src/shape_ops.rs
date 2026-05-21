@@ -599,10 +599,15 @@ pub fn gemv_f32_neon(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize) {
 }
 
 pub(crate) fn matmul_2d_neon_blocked(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    // Same M=1 short-circuit as the unblocked path; the K-block loop
-    // never sees enough M to justify the 4-row tile overhead.
-    if m == 1 {
-        gemv_f32_neon(a, b, c, n, k);
+    // Same M<4 short-circuit as the unblocked path; the K-block
+    // loop's 4-row tile never sees enough M to justify the setup
+    // overhead when M is 1..3 (small batch / decode).
+    if m < 4 {
+        for row in 0..m {
+            let a_row = &a[row * k..row * k + k];
+            let c_row = &mut c[row * n..(row + 1) * n];
+            gemv_f32_neon(a_row, b, c_row, n, k);
+        }
         return;
     }
 
@@ -839,13 +844,16 @@ unsafe fn matmul_kernel_4x4_accum(
 }
 
 fn matmul_2d_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    // M=1 (LLM decode-step hot path) deserves a dedicated NEON GEMV.
-    // The 4-row tile kernel below skips M<4 entirely, so without this
-    // route every decode-step matmul falls through to scalar code at
-    // ~0.2 GFLOPS. The GEMV broadcast-FMA over N columns sits closer
-    // to 5–10 GFLOPS even on a single core.
-    if m == 1 {
-        gemv_f32_neon(a, b, c, n, k);
+    // M < 4 (LLM decode and small-batch inference) deserves a
+    // dedicated NEON GEMV per row. The 4-row tile kernel below
+    // skips M<4 entirely, so without this route those matmuls fell
+    // through to a pure scalar loop at ~0.2 GFLOPS.
+    if m < 4 {
+        for row in 0..m {
+            let a_row = &a[row * k..row * k + k];
+            let c_row = &mut c[row * n..(row + 1) * n];
+            gemv_f32_neon(a_row, b, c_row, n, k);
+        }
         return;
     }
 
@@ -1271,10 +1279,7 @@ pub fn linear_f32(
             let w_base = j * k;
             let w = &weights[w_base..w_base + k];
 
-            let mut acc = 0.0f32;
-            for kk in 0..k {
-                acc += a[kk] * w[kk];
-            }
+            let acc = dot_f32_neon(a, w);
 
             let with_bias = acc + bias.map(|bb| bb[j]).unwrap_or(0.0);
 
@@ -1291,6 +1296,59 @@ pub fn linear_f32(
     });
 
     Ok(out)
+}
+
+/// NEON dot product of two equal-length f32 slices. The weight panel
+/// of fused linear is laid out output-major (each output j has K
+/// contiguous weights), so what we want per (i, j) is exactly this.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn dot_f32_neon(a: &[f32], b: &[f32]) -> f32 {
+    use core::arch::aarch64::*;
+    debug_assert_eq!(a.len(), b.len());
+    let k = a.len();
+
+    unsafe {
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut kk = 0;
+
+        // 16-lane unroll (4× 4-wide).
+        while kk + 16 <= k {
+            let a0 = vld1q_f32(a.as_ptr().add(kk));
+            let a1 = vld1q_f32(a.as_ptr().add(kk + 4));
+            let a2 = vld1q_f32(a.as_ptr().add(kk + 8));
+            let a3 = vld1q_f32(a.as_ptr().add(kk + 12));
+            let b0 = vld1q_f32(b.as_ptr().add(kk));
+            let b1 = vld1q_f32(b.as_ptr().add(kk + 4));
+            let b2 = vld1q_f32(b.as_ptr().add(kk + 8));
+            let b3 = vld1q_f32(b.as_ptr().add(kk + 12));
+            acc0 = vfmaq_f32(acc0, a0, b0);
+            acc1 = vfmaq_f32(acc1, a1, b1);
+            acc0 = vfmaq_f32(acc0, a2, b2);
+            acc1 = vfmaq_f32(acc1, a3, b3);
+            kk += 16;
+        }
+        while kk + 4 <= k {
+            let av = vld1q_f32(a.as_ptr().add(kk));
+            let bv = vld1q_f32(b.as_ptr().add(kk));
+            acc0 = vfmaq_f32(acc0, av, bv);
+            kk += 4;
+        }
+
+        let mut total = vaddvq_f32(vaddq_f32(acc0, acc1));
+        while kk < k {
+            total += a[kk] * b[kk];
+            kk += 1;
+        }
+        total
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+fn dot_f32_neon(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 /// Fused bias-add + activation: `out[i] = activation(act[i] + bias[i mod inner])`.

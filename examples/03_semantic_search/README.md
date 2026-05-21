@@ -46,10 +46,11 @@ Replace the synthetic corpus building with:
 
 ```elixir
 {:ok, encoder} = NxArm.Models.Onnx.load("/root/models/all-MiniLM-L6-v2.onnx")
-{:ok, tok}     = NxArm.Tokenizer.load("/root/models/all-MiniLM-L6-v2-tokenizer.json")
+{:ok, tok}     = Tokenizers.Tokenizer.from_file("/root/models/all-MiniLM-L6-v2-tokenizer.json")
 
 defp encode(text) do
-  ids = NxArm.Tokenizer.encode(tok, text)
+  {:ok, enc} = Tokenizers.Tokenizer.encode(tok, text)
+  ids = Tokenizers.Encoding.get_ids(enc)
   attn = List.duplicate(1, length(ids))
 
   outputs = NxArm.Models.Onnx.run(encoder, %{

@@ -24,8 +24,9 @@ defmodule NxArm.Models.StableDiffusion do
   {:ok, vae_dec}  = NxArm.Models.Onnx.load("/data/sd_vae_decoder.onnx")
 
   # Tokenise prompt → CLIP embedding
-  {:ok, tok} = NxArm.Tokenizer.load("/data/sd_tokenizer.json")
-  ids = NxArm.Tokenizer.encode(tok, "a cosmonaut on a horse")
+  {:ok, tok} = Tokenizers.Tokenizer.from_file("/data/sd_tokenizer.json")
+  {:ok, enc} = Tokenizers.Tokenizer.encode(tok, "a cosmonaut on a horse")
+  ids = Tokenizers.Encoding.get_ids(enc)
   embedding = NxArm.Models.Onnx.run(text_enc, %{"input_ids" => ids_tensor(ids)})
                 |> Map.fetch!("last_hidden_state")
 

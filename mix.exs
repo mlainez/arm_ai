@@ -47,6 +47,10 @@ defmodule NxArm.MixProject do
   defp deps do
     [
       {:nx, "~> 0.9"},
+      # Upstream tokenizer + safetensors (replacing nx_arm's own NIF
+      # wrappers, which were duplicating these crates).
+      {:tokenizers, "~> 0.5"},
+      {:safetensors, "~> 0.1"},
       {:axon, "~> 0.7", only: [:test]},
       {:bumblebee, "~> 0.6", only: [:test]},
       {:rustler, "~> 0.36", optional: true},

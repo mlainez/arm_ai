@@ -61,13 +61,15 @@ half = "2"
 candle-core         = { version = "0.8",  default-features = false, optional = true }
 candle-transformers = { version = "0.8",  default-features = false, optional = true }
 candle-nn           = { version = "0.8",  default-features = false, optional = true }
+# `tokenizers` is used internally by the Whisper bridge (whisper has
+# its own tokenizer baked into the model). Elixir-side tokenization
+# is done via the upstream `:tokenizers` Hex package, not this crate.
 tokenizers          = { version = "0.20", default-features = false, features = ["onig"], optional = true }
 tract-onnx          = { version = "0.21", default-features = false, optional = true }
 symphonia           = { version = "0.5",  default-features = false, features = ["mp3", "wav", "flac", "ogg", "vorbis", "pcm"], optional = true }
 rubato              = { version = "0.16", default-features = false, optional = true }
 image               = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 fast_image_resize   = { version = "5",                                                                  optional = true }
-safetensors         = { version = "0.4",                                                                optional = true }
 rustfft             = { version = "6",                                                                  optional = true }
 byteorder           = { version = "1",                                                                  optional = true }
 serde_json          = { version = "1",                                                                  optional = true }
@@ -75,7 +77,7 @@ serde_json          = { version = "1",                                          
 [features]
 # `full` is what most users want — every capability we ship.
 default = ["full"]
-full = ["llm", "tokenizers", "onnx", "audio", "vision", "whisper", "safetensors", "fft"]
+full = ["llm", "onnx", "audio", "vision", "whisper", "fft"]
 
 # `pgo` declares the extern for __llvm_profile_write_file so we can
 # force-flush the profile counters before BEAM exits. Only enable
@@ -86,19 +88,17 @@ pgo = []
 
 # Atomic capabilities (declare what you actually use):
 llm        = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn"]
-tokenizers = ["dep:tokenizers"]
 onnx       = ["dep:tract-onnx"]
 audio      = ["dep:symphonia", "dep:rubato"]
 vision     = ["dep:image", "dep:fast_image_resize"]
-safetensors = ["dep:safetensors"]
 # FFT / IFFT via rustfft. Pulls in ~200 KB; NEON-tuned for ARM.
 fft = ["dep:rustfft"]
 
 # Composite use-case presets (resolve to atomic features):
-whisper          = ["llm", "tokenizers", "audio", "dep:byteorder", "dep:serde_json"]
-chatbot          = ["llm", "tokenizers"]
+whisper          = ["llm", "audio", "dep:byteorder", "dep:serde_json", "dep:tokenizers"]
+chatbot          = ["llm"]
 voice-assistant  = ["whisper", "onnx", "vision"]                                  # voice in, optional TTS, optional camera
 yolo             = ["onnx", "vision"]
 piper-tts        = ["onnx", "audio"]
-sentence-rag     = ["onnx", "tokenizers"]
+sentence-rag     = ["onnx"]
 vision-only      = ["onnx", "vision"]

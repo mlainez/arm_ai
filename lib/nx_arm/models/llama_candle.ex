@@ -47,7 +47,7 @@ defmodule NxArm.Models.LlamaCandle do
                 nil
 
               tok_path ->
-                case NxArm.Tokenizer.load(tok_path) do
+                case Tokenizers.Tokenizer.from_file(tok_path) do
                   {:ok, tok} -> tok
                   {:error, _} -> nil
                 end
@@ -80,7 +80,8 @@ defmodule NxArm.Models.LlamaCandle do
                   "load/2 with `tokenizer:` path to use string :prompt — got plain text but no tokenizer"
           end
 
-          {NxArm.Tokenizer.encode(tokenizer, text), true}
+          {:ok, encoding} = Tokenizers.Tokenizer.encode(tokenizer, text)
+          {Tokenizers.Encoding.get_ids(encoding), true}
 
         prompt = Keyword.get(opts, :prompt_tokens) ->
           {prompt, false}
@@ -113,7 +114,8 @@ defmodule NxArm.Models.LlamaCandle do
 
       result =
         if return_string? do
-          NxArm.Tokenizer.decode(tokenizer, all)
+          {:ok, text} = Tokenizers.Tokenizer.decode(tokenizer, all)
+          text
         else
           all
         end

@@ -61,15 +61,16 @@ IO.puts("  → \"#{transcript}\"")
 IO.puts("== 3. LLM ==")
 {:ok, llm} = NxArm.Models.LlamaCandle.load(llama_gguf)
 prompt = "Q: #{transcript}\nA:"
-{:ok, tokenizer} = NxArm.Tokenizer.load("/root/models/tinyllama-tokenizer.json")
-prompt_tokens = NxArm.Tokenizer.encode(tokenizer, prompt)
+{:ok, tokenizer} = Tokenizers.Tokenizer.from_file("/root/models/tinyllama-tokenizer.json")
+{:ok, prompt_enc} = Tokenizers.Tokenizer.encode(tokenizer, prompt)
+prompt_tokens = Tokenizers.Encoding.get_ids(prompt_enc)
 {response_tokens, _stats} =
   NxArm.Models.LlamaCandle.generate(llm,
     prompt_tokens: prompt_tokens,
     max_new: 48,
     stop_tokens: [2]
   )
-answer = NxArm.Tokenizer.decode(tokenizer, response_tokens)
+{:ok, answer} = Tokenizers.Tokenizer.decode(tokenizer, response_tokens)
 IO.puts("  → \"#{answer}\"")
 
 IO.puts("== 4. Piper ==")

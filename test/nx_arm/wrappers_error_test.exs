@@ -25,19 +25,15 @@ defmodule NxArm.WrappersErrorTest do
     end
   end
 
-  describe "NxArm.SafeTensors" do
-    test "load on a missing file returns {:error, _}" do
-      assert {:error, _} = NxArm.SafeTensors.load("/tmp/__no_such.safetensors")
+  describe "upstream Safetensors / Tokenizers contracts (no nx_arm wrappers)" do
+    test "Safetensors.read! raises on a missing file" do
+      assert_raise File.Error, fn ->
+        Safetensors.read!("/tmp/__no_such.safetensors")
+      end
     end
 
-    test "metadata on a missing file returns {:error, _}" do
-      assert {:error, _} = NxArm.SafeTensors.metadata("/tmp/__no_such.safetensors")
-    end
-  end
-
-  describe "NxArm.Tokenizer" do
-    test "load on a missing file returns {:error, _}" do
-      assert {:error, _} = NxArm.Tokenizer.load("/tmp/__no_such_tokenizer.json")
+    test "Tokenizers.Tokenizer.from_file returns {:error, _} on missing file" do
+      assert {:error, _} = Tokenizers.Tokenizer.from_file("/tmp/__no_such_tokenizer.json")
     end
   end
 

@@ -92,13 +92,11 @@ defmodule NxArm.BumblebeeAxonTest do
     assert diff < 1.0e-4, "grad diverged: diff=#{diff}"
   end
 
-  test "Bumblebee tokenizer roundtrip via NxArm.Tokenizer wraps the same crate" do
-    # Bumblebee uses the `tokenizers` Hex package which wraps the
-    # same Rust crate we just bridged. Sanity-check that an
-    # NxArm-encoded prompt decodes back identically.
-    #
-    # We only run this when a system tokenizer.json is around — the
-    # CI image typically doesn't ship one. Skip if not present.
+  test "tokenizer roundtrip via upstream :tokenizers" do
+    # The Bumblebee path shares the same `:tokenizers` Hex package
+    # (the elixir-nx wrapper around HuggingFace's Rust crate).
+    # Sanity-check that an encode → decode roundtrip survives.
+    # Skip if no tokenizer.json is staged.
     candidates = [
       "/root/tinyllama-tokenizer.json",
       "/tmp/tinyllama-tokenizer.json"
@@ -106,14 +104,15 @@ defmodule NxArm.BumblebeeAxonTest do
 
     case Enum.find(candidates, &File.exists?/1) do
       nil ->
-        # Tokenizer file not staged in this test env — just confirm
-        # the module + NIF wiring is alive.
-        assert function_exported?(NxArm.Native, :tokenizer_encode_op, 3)
+        # No tokenizer file in this test env — just confirm the
+        # upstream module is loaded.
+        assert Code.ensure_loaded?(Tokenizers.Tokenizer)
 
       path ->
-        {:ok, tok} = NxArm.Tokenizer.load(path)
-        ids = NxArm.Tokenizer.encode(tok, "Hello world", add_special_tokens: false)
-        text = NxArm.Tokenizer.decode(tok, ids, skip_special_tokens: true)
+        {:ok, tok} = Tokenizers.Tokenizer.from_file(path)
+        {:ok, enc} = Tokenizers.Tokenizer.encode(tok, "Hello world", add_special_tokens: false)
+        ids = Tokenizers.Encoding.get_ids(enc)
+        {:ok, text} = Tokenizers.Tokenizer.decode(tok, ids, skip_special_tokens: true)
         assert String.downcase(text) =~ "hello"
     end
   end

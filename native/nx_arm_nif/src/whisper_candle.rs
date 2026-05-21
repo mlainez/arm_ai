@@ -180,10 +180,38 @@ fn token_id(tok: &Tokenizer, sym: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("tokenizer missing symbol: {}", sym))
 }
 
-/// Greedy-decode an audio buffer (16 kHz mono f32) to text. For
-/// chunks longer than 30 s we'd need a sliding-window loop; for
-/// first cut we transcribe the first 30 s only.
+/// Transcribe an arbitrarily-long 16 kHz mono f32 buffer by
+/// sliding a 30-second window. Each window contributes a chunk of
+/// text; chunks are joined with a single space. For overlapping
+/// windows we suppress the leading EOT / SOT special tokens that
+/// would otherwise repeat.
 pub fn transcribe(res: &WhisperResource, pcm: &[f32]) -> Result<String, String> {
+    const STEP: usize = m::N_SAMPLES; // 30 s, no overlap
+    if pcm.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut out = String::new();
+    let mut start = 0usize;
+
+    while start < pcm.len() {
+        let end = (start + STEP).min(pcm.len());
+        let chunk_text = transcribe_chunk(res, &pcm[start..end])?;
+
+        if !chunk_text.is_empty() {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(chunk_text.trim());
+        }
+
+        start += STEP;
+    }
+
+    Ok(out)
+}
+
+fn transcribe_chunk(res: &WhisperResource, pcm: &[f32]) -> Result<String, String> {
     let device = Device::Cpu;
 
     // Pad/truncate to 30 s.

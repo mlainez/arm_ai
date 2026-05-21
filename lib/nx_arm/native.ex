@@ -453,6 +453,47 @@ defmodule NxArm.Native do
   def tokenizer_decode_op(_handle, _ids, _skip_special),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  # --- Embeddings / RAG primitives ---
+
+  @spec l2_normalize_rows_f32_op(binary(), pos_integer(), pos_integer()) :: binary()
+  def l2_normalize_rows_f32_op(_data, _n, _d), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec cosine_similarity_f32_op(binary(), binary(), pos_integer(), pos_integer()) :: binary()
+  def cosine_similarity_f32_op(_q, _corpus, _n, _d), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec top_k_indices_f32_op(binary(), pos_integer()) :: [non_neg_integer()]
+  def top_k_indices_f32_op(_scores, _k), do: :erlang.nif_error(:nif_not_loaded)
+
+  # --- Vision (image + fast_image_resize) ---
+
+  @spec vision_decode_to_rgb8_op(String.t()) :: {binary(), pos_integer(), pos_integer()}
+  def vision_decode_to_rgb8_op(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec vision_load_for_classifier_op(
+          String.t(),
+          pos_integer(),
+          pos_integer(),
+          {float(), float(), float()},
+          {float(), float(), float()},
+          :nchw | :nhwc
+        ) :: binary()
+  def vision_load_for_classifier_op(_path, _h, _w, _mean, _std, _layout),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  # --- Audio (symphonia + rubato) ---
+
+  @spec audio_decode_file_op(String.t()) :: {binary(), pos_integer(), pos_integer()}
+  def audio_decode_file_op(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec audio_to_mono_op(binary(), pos_integer()) :: binary()
+  def audio_to_mono_op(_samples, _channels), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec audio_resample_op(binary(), pos_integer(), pos_integer()) :: binary()
+  def audio_resample_op(_samples, _from_hz, _to_hz), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec audio_load_for_whisper_op(String.t()) :: binary()
+  def audio_load_for_whisper_op(_path), do: :erlang.nif_error(:nif_not_loaded)
+
   # --- ONNX (tract-onnx) ---
 
   @doc """

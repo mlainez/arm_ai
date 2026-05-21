@@ -5,7 +5,10 @@
 // Elixir backend (NxArm.Backend) stores tensors as plain binaries
 // and dispatches each Nx callback to one of these.
 
+#[cfg(feature = "audio")]
+mod audio;
 mod conv_int8;
+mod vision;
 #[cfg(feature = "llm")]
 mod llama_candle;
 #[cfg(feature = "onnx")]
@@ -1387,7 +1390,7 @@ fn current_thread_count_op() -> usize {
 }
 
 mod atoms {
-    rustler::atoms! { ok, already_initialised }
+    rustler::atoms! { ok, already_initialised, nhwc, nchw }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1752,6 +1755,153 @@ fn onnx_run_op<'a>(
     }
 
     Ok(out_terms)
+}
+
+// ---------------------------------------------------------------
+// Embeddings / RAG primitives.
+// ---------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn l2_normalize_rows_f32_op<'a>(
+    env: Env<'a>,
+    data: rustler::Binary<'a>,
+    n: usize,
+    d: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let src: &[f32] = unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const f32, n * d)
+    };
+    let mut buf = src.to_vec();
+    ops::l2_normalize_rows_f32(&mut buf, n, d);
+    f32_vec_to_bin(env, &buf)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn cosine_similarity_f32_op<'a>(
+    env: Env<'a>,
+    q: rustler::Binary<'a>,
+    corpus: rustler::Binary<'a>,
+    n: usize,
+    d: usize,
+) -> NifResult<rustler::Binary<'a>> {
+    let q_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(q.as_ptr() as *const f32, d)
+    };
+    let c_slice: &[f32] = unsafe {
+        std::slice::from_raw_parts(corpus.as_ptr() as *const f32, n * d)
+    };
+    let scores = ops::cosine_similarity_f32(q_slice, c_slice, n, d);
+    f32_vec_to_bin(env, &scores)
+}
+
+#[rustler::nif]
+fn top_k_indices_f32_op(scores: rustler::Binary, k: usize) -> NifResult<Vec<i32>> {
+    let s: &[f32] = unsafe {
+        std::slice::from_raw_parts(scores.as_ptr() as *const f32, scores.as_slice().len() / 4)
+    };
+    Ok(ops::top_k_indices_f32(s, k))
+}
+
+// ---------------------------------------------------------------
+// Vision preprocessing: image decode + resize + normalise.
+// Always-on (image + fast_image_resize are core deps).
+// ---------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn vision_decode_to_rgb8_op<'a>(
+    env: Env<'a>,
+    path: String,
+) -> NifResult<(rustler::Binary<'a>, u32, u32)> {
+    let (w, h, rgb) = vision::decode_to_rgb8(&path)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("vision decode: {}", e))))?;
+    let bin = bytes_to_bin(env, &rgb)?;
+    Ok((bin, w, h))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn vision_load_for_classifier_op<'a>(
+    env: Env<'a>,
+    path: String,
+    out_h: u32,
+    out_w: u32,
+    mean: (f32, f32, f32),
+    std: (f32, f32, f32),
+    layout: rustler::Atom,
+) -> NifResult<rustler::Binary<'a>> {
+    let layout_v = if layout == atoms::nchw() {
+        vision::Layout::Nchw
+    } else {
+        vision::Layout::Nhwc
+    };
+
+    let out = vision::load_for_classifier(
+        &path,
+        out_h,
+        out_w,
+        [mean.0, mean.1, mean.2],
+        [std.0, std.1, std.2],
+        layout_v,
+    )
+    .map_err(|e| rustler::Error::Term(Box::new(format!("vision load: {}", e))))?;
+
+    f32_vec_to_bin(env, &out)
+}
+
+// ---------------------------------------------------------------
+// Audio decode + resample (symphonia + rubato). Behind `audio`.
+// ---------------------------------------------------------------
+
+#[cfg(feature = "audio")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn audio_decode_file_op<'a>(
+    env: Env<'a>,
+    path: String,
+) -> NifResult<(rustler::Binary<'a>, u32, u16)> {
+    let decoded = audio::decode_file(&path)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("audio decode: {}", e))))?;
+    let bin = f32_vec_to_bin(env, &decoded.samples)?;
+    Ok((bin, decoded.sample_rate, decoded.channels))
+}
+
+#[cfg(feature = "audio")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn audio_to_mono_op<'a>(
+    env: Env<'a>,
+    samples: rustler::Binary<'a>,
+    channels: u16,
+) -> NifResult<rustler::Binary<'a>> {
+    let s: &[f32] = unsafe {
+        std::slice::from_raw_parts(samples.as_ptr() as *const f32, samples.as_slice().len() / 4)
+    };
+    let mono = audio::to_mono(s, channels);
+    f32_vec_to_bin(env, &mono)
+}
+
+#[cfg(feature = "audio")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn audio_resample_op<'a>(
+    env: Env<'a>,
+    samples: rustler::Binary<'a>,
+    from_hz: u32,
+    to_hz: u32,
+) -> NifResult<rustler::Binary<'a>> {
+    let s: &[f32] = unsafe {
+        std::slice::from_raw_parts(samples.as_ptr() as *const f32, samples.as_slice().len() / 4)
+    };
+    let out = audio::resample(s, from_hz, to_hz)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("resample: {}", e))))?;
+    f32_vec_to_bin(env, &out)
+}
+
+#[cfg(feature = "audio")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn audio_load_for_whisper_op<'a>(
+    env: Env<'a>,
+    path: String,
+) -> NifResult<rustler::Binary<'a>> {
+    let samples = audio::decode_to_mono_at(&path, 16_000)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("audio for whisper: {}", e))))?;
+    f32_vec_to_bin(env, &samples)
 }
 
 fn load(env: Env, _info: rustler::Term) -> bool {

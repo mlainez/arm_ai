@@ -33,9 +33,17 @@ tokenizers = { version = "0.20", default-features = false, features = ["onig"], 
 # is enabled.
 tract-onnx = { version = "0.21", default-features = false, optional = true }
 
+# Audio: decode (Symphonia covers MP3/FLAC/Opus/WAV/Vorbis) +
+# resample (Rubato is the standard rate-converter, used by Whisper
+# pipelines to get 16 kHz mono f32 input).
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "flac", "ogg", "vorbis", "pcm"], optional = true }
+rubato = { version = "0.16", default-features = false, optional = true }
+
 [features]
-default = ["llm", "onnx"]
+default = ["llm", "onnx", "audio"]
 # All-rust LLM stack: candle + tokenizers.
 llm = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers"]
 # tract-onnx — the universal HuggingFace model path. Heavy.
 onnx = ["dep:tract-onnx"]
+# Audio decode + resample for the Whisper / VAD path. Cheap.
+audio = ["dep:symphonia", "dep:rubato"]

@@ -373,6 +373,95 @@ pub fn stack_axis0(tensors: &[&[u8]], out: &mut [u8], tensor_bytes: usize) {
 }
 
 // ---------------------------------------------------------------
+// Embedding ops — the building blocks for on-device semantic
+// search / RAG / retrieval.
+// ---------------------------------------------------------------
+
+/// L2-normalise rows of an `(n, d)` matrix in place. Cheap pre-step
+/// so cosine sim becomes a plain dot product.
+pub fn l2_normalize_rows_f32(data: &mut [f32], n: usize, d: usize) {
+    use rayon::prelude::*;
+    debug_assert_eq!(data.len(), n * d);
+    data.par_chunks_mut(d).for_each(|row| {
+        let mut sum_sq = 0.0f32;
+        for &v in row.iter() {
+            sum_sq += v * v;
+        }
+        let inv = if sum_sq > 0.0 {
+            1.0 / sum_sq.sqrt()
+        } else {
+            1.0
+        };
+        for v in row.iter_mut() {
+            *v *= inv;
+        }
+    });
+}
+
+/// Cosine similarity between a query vector `q` (length `d`) and
+/// every row of `corpus` (shape `(n, d)`). Returns `(n,)` scores.
+///
+/// Both inputs must be pre-L2-normalised — this then collapses to
+/// `q · corpus[i]`. We hand off to `gemm` for the dot product so the
+/// throughput matches our matmul kernels.
+pub fn cosine_similarity_f32(
+    q: &[f32],
+    corpus: &[f32],
+    n: usize,
+    d: usize,
+) -> Vec<f32> {
+    debug_assert_eq!(q.len(), d);
+    debug_assert_eq!(corpus.len(), n * d);
+
+    // Treat q as (1, d), corpus as (n, d). Result (1, n) = q · corpus^T.
+    // Reuse the batched matmul wrapper from shape_ops.
+    crate::shape_ops::batched_matmul_f32(q, corpus, 1, 1, n, d, true)
+        .expect("cosine_similarity dimensions checked above")
+}
+
+/// Return the indices of the top `k` highest values in `scores`,
+/// ordered descending. O(n log k) via a min-heap.
+pub fn top_k_indices_f32(scores: &[f32], k: usize) -> Vec<i32> {
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
+    if k == 0 || scores.is_empty() {
+        return Vec::new();
+    }
+
+    #[derive(PartialEq)]
+    struct Entry(f32, i32);
+    impl Eq for Entry {}
+    impl Ord for Entry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            // Min-heap: reverse the natural ordering on f32.
+            other.0.partial_cmp(&self.0).unwrap_or(Ordering::Equal)
+        }
+    }
+    impl PartialOrd for Entry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(k + 1);
+    for (i, &s) in scores.iter().enumerate() {
+        if heap.len() < k {
+            heap.push(Entry(s, i as i32));
+        } else if let Some(top) = heap.peek() {
+            if s > top.0 {
+                heap.pop();
+                heap.push(Entry(s, i as i32));
+            }
+        }
+    }
+
+    let mut out: Vec<(f32, i32)> = heap.into_iter().map(|e| (e.0, e.1)).collect();
+    out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+    out.into_iter().map(|(_, i)| i).collect()
+}
+
+// ---------------------------------------------------------------
 // sort + argsort along the last axis. Stable sort via Rust's std.
 // Directions: 0 = ascending, 1 = descending.
 //

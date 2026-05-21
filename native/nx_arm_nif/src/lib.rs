@@ -1165,6 +1165,10 @@ fn init_perf_cluster_op() -> (rustler::Atom, usize, Vec<usize>, String) {
     let perf = topo.perf_cores.clone();
     let n = perf.len().max(1);
 
+    // Seed the per-thread pin cache so any BEAM dirty scheduler
+    // that later enters our NIFs pins itself to the same cluster.
+    topology::set_perf_cluster_cache(perf.clone());
+
     let pinning_cores = perf.clone();
     let res = rayon::ThreadPoolBuilder::new()
         .num_threads(n)
@@ -1179,6 +1183,20 @@ fn init_perf_cluster_op() -> (rustler::Atom, usize, Vec<usize>, String) {
     };
 
     (status, n, perf, topo.source.to_string())
+}
+
+/// Pin the calling BEAM dirty scheduler thread to the perf cluster.
+/// Cheap on subsequent calls (thread-local cache). Called from
+/// `NxArm.Runtime` on warmup to ensure all live dirty schedulers
+/// migrate to the perf cluster once.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn pin_calling_thread_op() -> rustler::Atom {
+    topology::ensure_thread_pinned();
+    // Sleep briefly so the BEAM doesn't immediately re-use this
+    // thread for the next warmup task — we want every dirty
+    // scheduler to get its own pin call.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    atoms::ok()
 }
 
 #[rustler::nif]

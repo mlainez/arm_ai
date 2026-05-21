@@ -212,6 +212,50 @@ pub fn pin_current_thread_to(cores: &[usize]) {
     let _ = cores;
 }
 
+// ---------------------------------------------------------------
+// On-demand per-thread perf-cluster pinning for BEAM dirty
+// schedulers.
+//
+// rayon's pool we pin at build time. But the BEAM thread that calls
+// into our NIF (a "dirty CPU scheduler") is owned by the Erlang VM
+// and the kernel scheduler may park it on any core, including
+// LITTLE ones. The synchronous half of every NIF (binary unpacking,
+// shape arithmetic, OwnedBinary alloc) runs on whichever core that
+// thread happens to be on. On big.LITTLE chips that's the main
+// source of dispatch latency variance.
+//
+// We fix it by pinning the calling thread to the perf cluster the
+// first time it enters our code. A thread_local flag avoids
+// re-pinning on every NIF call.
+// ---------------------------------------------------------------
+
+use std::sync::OnceLock;
+static PERF_CORES: OnceLock<Vec<usize>> = OnceLock::new();
+
+pub fn set_perf_cluster_cache(cores: Vec<usize>) {
+    let _ = PERF_CORES.set(cores);
+}
+
+thread_local! {
+    static THREAD_PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Pin the calling thread to the perf cluster (if known). Call at
+/// the top of any hot NIF. After the first hit on a given OS thread
+/// this is just a thread-local load + branch.
+pub fn ensure_thread_pinned() {
+    THREAD_PINNED.with(|f| {
+        if !f.get() {
+            if let Some(cores) = PERF_CORES.get() {
+                if !cores.is_empty() {
+                    pin_current_thread_to(cores);
+                }
+            }
+            f.set(true);
+        }
+    });
+}
+
 #[cfg(target_os = "linux")]
 extern "C" {
     #[link_name = "sched_setaffinity"]

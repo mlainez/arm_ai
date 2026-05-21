@@ -396,6 +396,16 @@ defmodule NxArm.Native do
   def detect_topology_op,
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Pin the calling BEAM thread to the detected perf cluster. Use
+  this from a startup warmup to make every dirty scheduler thread
+  migrate once. The pin is cached thread-local; calling this on a
+  thread that's already pinned is a no-op + a single read.
+  """
+  @spec pin_calling_thread_op() :: :ok
+  def pin_calling_thread_op,
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # -------------------------------------------------------------
   # Production-readiness ops: replace BinaryBackend fallbacks for
   # argmax/argmin, select, as_type, clip, pad, gather, stack.

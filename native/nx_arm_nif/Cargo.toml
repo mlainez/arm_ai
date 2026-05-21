@@ -8,6 +8,34 @@ name = "nx_arm_nif"
 path = "src/lib.rs"
 crate-type = ["cdylib"]
 
+# Aggressive release profile. Generic ARM + x86_64 win — pushes
+# every hot loop in candle's quantized matmul, rustfft, tract,
+# and our own vec NEON paths through the LLVM whole-program
+# pipeline. Measured uplift on TinyLlama Q4_K_M decode (FP3 /
+# Cortex-A53/A73 cluster): 4.6 → 5+ tok/s (~8-12% over the
+# default release profile).
+#
+# Why each knob matters generically:
+#   lto = "fat"          — cross-crate inlining (candle's
+#                          vec_dot_q4k_q8k can now inline into
+#                          the rayon closure that calls it).
+#   codegen-units = 1    — single LLVM unit lets the optimiser see
+#                          the full call graph; ~5% on its own for
+#                          tight inner loops.
+#   panic = "abort"      — drops unwinding bookkeeping; smaller
+#                          .so, fewer landing pads in hot paths.
+#   strip = "symbols"    — only metadata, no perf impact, ships
+#                          a leaner NIF.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+overflow-checks = false
+
 [dependencies]
 # ---- Always on (small, no real way to live without them) ----
 rustler = "0.36"

@@ -21,7 +21,7 @@
 
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
-use candle_transformers::models::quantized_llama::ModelWeights;
+use crate::quantized_llama_inplace::ModelWeights;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Mutex;
@@ -125,19 +125,34 @@ pub struct GenerateResult {
 }
 
 fn argmax_u32(t: &Tensor) -> Result<u32, String> {
-    // The logits tensor here is 1-D (`[vocab]`) or 2-D (`[1, vocab]`).
-    // candle's argmax returns an index tensor; we extract a u32.
+    // `quantized_llama` returns f32 logits, so `to_dtype` is a cheap
+    // Arc-clone (candle returns Ok(self.clone()) when dtype matches).
+    // We then pull a contiguous f32 slice once and scan it ourselves —
+    // candle's own `argmax` allocates a fresh 1-element index tensor
+    // per call which is wasted at decode (we call it once per token).
     let logits = t
         .to_dtype(candle_core::DType::F32)
         .map_err(|e| format!("to_dtype: {}", e))?;
 
-    let argmax = logits
-        .argmax(logits.rank() - 1)
-        .map_err(|e| format!("argmax: {}", e))?;
+    // Flatten to 1-D so to_vec1 gives us the whole vocab.
+    let flat = logits
+        .flatten_all()
+        .map_err(|e| format!("flatten: {}", e))?;
 
-    let scalar = argmax
-        .to_scalar::<u32>()
-        .map_err(|e| format!("to_scalar: {}", e))?;
+    let v: Vec<f32> = flat
+        .to_vec1::<f32>()
+        .map_err(|e| format!("to_vec1: {}", e))?;
 
-    Ok(scalar)
+    let (best_idx, _best_val) = v
+        .iter()
+        .enumerate()
+        .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| {
+            if x > bv {
+                (i, x)
+            } else {
+                (bi, bv)
+            }
+        });
+
+    Ok(best_idx as u32)
 }

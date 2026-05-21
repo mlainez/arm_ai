@@ -16,6 +16,8 @@ mod safetensors_load;
 mod vision;
 #[cfg(feature = "llm")]
 mod llama_candle;
+#[cfg(feature = "llm")]
+mod quantized_llama_inplace;
 #[cfg(feature = "onnx")]
 mod onnx;
 mod ops;

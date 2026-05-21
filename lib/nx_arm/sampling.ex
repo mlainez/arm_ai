@@ -44,29 +44,64 @@ defmodule NxArm.Sampling do
     temperature = Keyword.get(opts, :temperature, 1.0)
     top_k = Keyword.get(opts, :top_k)
     top_p = Keyword.get(opts, :top_p)
+    rep_penalty = Keyword.get(opts, :repetition_penalty)
+    rep_tokens = Keyword.get(opts, :recent_tokens, [])
 
     cond do
-      temperature == 0.0 ->
+      temperature == 0.0 and rep_penalty in [nil, 1.0] ->
         greedy(logits)
 
       true ->
         flat = Nx.flatten(logits) |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_flat_list()
-        scaled = Enum.map(flat, &(&1 / temperature))
 
-        scaled =
-          if top_k && top_k < length(scaled),
-            do: apply_top_k_list(scaled, top_k),
-            else: scaled
+        flat =
+          if rep_penalty && rep_penalty != 1.0 && rep_tokens != [],
+            do: apply_repetition_penalty(flat, rep_tokens, rep_penalty),
+            else: flat
 
-        probs = softmax_list(scaled)
+        if temperature == 0.0 do
+          # Repetition-penalty-modified greedy.
+          {idx, _} = Enum.with_index(flat) |> Enum.max_by(fn {v, _} -> v end) |> then(&{elem(&1, 1), elem(&1, 0)})
+          idx
+        else
+          scaled = Enum.map(flat, &(&1 / temperature))
 
-        probs =
-          if top_p,
-            do: apply_top_p_list(probs, top_p),
-            else: probs
+          scaled =
+            if top_k && top_k < length(scaled),
+              do: apply_top_k_list(scaled, top_k),
+              else: scaled
 
-        draw_categorical(probs)
+          probs = softmax_list(scaled)
+
+          probs =
+            if top_p,
+              do: apply_top_p_list(probs, top_p),
+              else: probs
+
+          draw_categorical(probs)
+        end
     end
+  end
+
+  @doc """
+  Apply a CTRL-style repetition penalty: for every token id in
+  `recent_tokens`, divide its logit by `penalty` if positive, multiply
+  if negative. Penalty > 1.0 discourages repetition; 1.0 is a no-op.
+  Returns the modified logits as an Elixir list.
+  """
+  @spec apply_repetition_penalty([number()], [non_neg_integer()], number()) :: [float()]
+  def apply_repetition_penalty(logits, recent_tokens, penalty)
+      when is_list(logits) and penalty > 0 do
+    seen = MapSet.new(recent_tokens)
+
+    Enum.with_index(logits)
+    |> Enum.map(fn {logit, idx} ->
+      if MapSet.member?(seen, idx) do
+        if logit > 0, do: logit / penalty, else: logit * penalty
+      else
+        logit * 1.0
+      end
+    end)
   end
 
   @doc """

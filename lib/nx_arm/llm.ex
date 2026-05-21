@@ -74,4 +74,51 @@ defmodule NxArm.LLM do
     end)
     |> Nx.tensor(type: :f32, backend: NxArm.Backend)
   end
+
+  @doc """
+  Build a causal attention mask of shape `{seq_len, seq_len}` for
+  prefill. `mask[i, j] = 0` when j ≤ i (allowed), `-inf` otherwise
+  (masked out before softmax). Allocated once per prefill batch.
+
+  The default fill value is `-1.0e9`, large enough to drive exp() to
+  zero in f32 but well clear of overflow when chained with other
+  additive offsets.
+  """
+  @spec causal_mask(pos_integer(), Keyword.t()) :: Nx.Tensor.t()
+  def causal_mask(seq_len, opts \\ []) do
+    type = Keyword.get(opts, :type, :f32)
+    masked_value = Keyword.get(opts, :masked_value, -1.0e9)
+
+    i = Nx.iota({seq_len, 1})
+    j = Nx.iota({1, seq_len})
+    allowed = Nx.greater_equal(i, j)
+    Nx.select(allowed, Nx.tensor(0.0, type: type), Nx.tensor(masked_value, type: type))
+  end
+
+  @doc """
+  Build a decode-step causal mask: shape `{1, kv_len}` where the
+  single query token can attend to all `kv_len` cached positions.
+  This is the trivial mask for autoregressive decode after prefill —
+  every cached key is in the past so nothing gets masked.
+
+  Returned as a zero tensor (no positions masked); kept as a function
+  to make the call site self-documenting and to let callers pass the
+  same dtype as their attention scores.
+  """
+  @spec decode_mask(pos_integer(), Keyword.t()) :: Nx.Tensor.t()
+  def decode_mask(kv_len, opts \\ []) do
+    type = Keyword.get(opts, :type, :f32)
+    Nx.broadcast(Nx.tensor(0.0, type: type), {1, kv_len})
+  end
+
+  @doc """
+  Apply RoPE at a single position to a tensor of shape
+  `{..., 1, head_dim}` (the decode step). Equivalent to building a
+  one-element `positions` tensor and calling `rope/3`.
+  """
+  @spec rope_at(Nx.Tensor.t(), non_neg_integer(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  def rope_at(qk, pos, inv_freq) do
+    positions = Nx.tensor([pos], type: :s64)
+    rope(qk, positions, inv_freq)
+  end
 end

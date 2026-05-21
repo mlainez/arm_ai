@@ -6,20 +6,24 @@ defmodule NxArm.Application do
 
   @impl true
   def start(_type, _args) do
-    # Run BEFORE the rayon pool init so any setup that touches the
-    # data partition (model load, etc.) sees the grown FS.
-    _ = NxArm.StorageResizer.run()
+    case Application.get_env(:nx_arm, :boot_mode, :normal) do
+      :recovery ->
+        # Bare boot — skip every side effect so we can ssh in and
+        # bring things up one at a time to find a regression.
+        # Drop a marker so iex can see we booted in recovery mode.
+        Logger.warning("[nx_arm] BOOT_MODE=:recovery — no autostart, no resizer, no model hub, no thread-pool pinning, no governor changes")
+        Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
 
-    # First-boot model downloads. Skipped silently when no models
-    # are configured. Runs synchronously so the user's app sees a
-    # ready filesystem before its own start callbacks fire.
-    _ = ensure_models()
-
-    auto_init_thread_pool()
-    warm_up_dirty_schedulers()
-    pin_normal_schedulers_to_efficiency()
-    maybe_apply_boot_governor()
-    Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
+      _ ->
+        # Normal path.
+        _ = NxArm.StorageResizer.run()
+        _ = ensure_models()
+        auto_init_thread_pool()
+        warm_up_dirty_schedulers()
+        pin_normal_schedulers_to_efficiency()
+        maybe_apply_boot_governor()
+        Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
+    end
   end
 
   defp ensure_models do

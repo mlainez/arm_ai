@@ -2101,4 +2101,13 @@ fn load(env: Env, _info: rustler::Term) -> bool {
     true
 }
 
+// PGO note: an earlier iteration tried to expose
+// __llvm_profile_write_file via a `#[rustler::nif] fn pgo_flush_op`
+// gated by the `pgo` feature. That broke NIF on_load (symbol couldn't
+// resolve at .so load time even with the profile runtime linked).
+// The atexit handler installed by `-Cprofile-generate` is sufficient
+// on Nerves — BEAM's signal-driven shutdown via erlinit DOES write
+// the .profraw before the process is reaped. Profile data was
+// captured successfully without any custom flush NIF.
+
 rustler::init!("Elixir.NxArm.Native", load = load);

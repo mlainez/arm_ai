@@ -7,7 +7,7 @@ products versus what's still bridge-quality. Updated 2026-05-21.
 
 | Use case | What it does | Verified ceiling |
 |---|---|---|
-| **Quantised LLM chat** (TinyLlama / SmolLM / Phi-Q4) | Q4_K_M GGUF inference via `NxArm.Models.LlamaCandle` | 5+ tok/s on FP3 (Snapdragon 632, 4× A73 @ 1.8 GHz) |
+| **Quantised LLM chat** (TinyLlama / SmolLM / Phi-Q4) | Q4_K_M GGUF inference via `NxArm.Models.LlamaCandle` | 4.7 tok/s on FP3 (Snapdragon 632, 4× A73 @ 1.8 GHz). 12–15 tok/s on A76+. See [perf_llm.md](perf_llm.md) for the ceiling analysis. |
 | **Sentence embeddings + RAG** | `NxArm.Embeddings` cosine search + top-k | ~700 µs/query for ~10 docs; scales linearly to ~10 k docs |
 | **Image classification** (ViT-tiny, MobileNet, EfficientNet-Q) | Bumblebee/Axon or `NxArm.Models.Onnx` | ViT-tiny warm forward ~3 s on FP3 |
 | **Generic ONNX inference** (conv/gemm/relu/softmax/resize) | `NxArm.Models.Onnx` over tract-onnx 0.21 | Works for most CV models post-2020; older exports need an opset bump (see `examples/04_yolo_detection/export_to_tract_opset.py`) |

@@ -29,7 +29,7 @@ defmodule NxArm.MixProject do
   def docs do
     [
       main: "readme",
-      extras: ["README.md"]
+      extras: ["README.md", "docs/deployment.md"]
     ]
   end
 
@@ -37,7 +37,10 @@ defmodule NxArm.MixProject do
     [
       name: :nx_arm,
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => "https://github.com/TODO/nx_arm"}
+      files: ~w(lib native/nx_arm_nif/src native/nx_arm_nif/Cargo.toml
+                native/nx_arm_nif/Cargo.lock README.md docs mix.exs
+                checksum-Elixir.NxArm.Native.exs),
+      links: %{"GitHub" => "https://github.com/marclainez/nx_arm"}
     ]
   end
 

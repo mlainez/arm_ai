@@ -8,6 +8,7 @@
 #[cfg(feature = "audio")]
 mod audio;
 mod conv_int8;
+#[cfg(feature = "vision")]
 mod vision;
 #[cfg(feature = "llm")]
 mod llama_candle;
@@ -15,7 +16,7 @@ mod llama_candle;
 mod onnx;
 mod ops;
 mod shape_ops;
-#[cfg(feature = "llm")]
+#[cfg(feature = "tokenizers")]
 mod tokenizer;
 mod topology;
 #[cfg(feature = "whisper")]
@@ -98,8 +99,8 @@ fn transpose_op<'a>(
 /// the trailing dim of `indices`. Most callers (token-embedding
 /// lookup) use `axes = [0]` — that goes through the fast contiguous
 /// memcpy path.
-/// Bilinear resize for HWC u8 image buffers. The image featurizer
-/// entry point for vision models.
+/// Bilinear resize for HWC u8 image buffers. Gated by `vision`.
+#[cfg(feature = "vision")]
 #[rustler::nif(schedule = "DirtyCpu")]
 fn bilinear_resize_u8_op<'a>(
     env: Env<'a>,
@@ -1672,7 +1673,7 @@ fn llama_candle_generate_op(
 // Tokenizer bridge (HuggingFace `tokenizers` crate).
 // ---------------------------------------------------------------
 
-#[cfg(feature = "llm")]
+#[cfg(feature = "tokenizers")]
 #[rustler::nif]
 fn tokenizer_load_op(path: String) -> NifResult<ResourceArc<tokenizer::TokenizerResource>> {
     let res = tokenizer::load(&path)
@@ -1680,7 +1681,7 @@ fn tokenizer_load_op(path: String) -> NifResult<ResourceArc<tokenizer::Tokenizer
     Ok(ResourceArc::new(res))
 }
 
-#[cfg(feature = "llm")]
+#[cfg(feature = "tokenizers")]
 #[rustler::nif]
 fn tokenizer_encode_op(
     res: ResourceArc<tokenizer::TokenizerResource>,
@@ -1691,7 +1692,7 @@ fn tokenizer_encode_op(
         .map_err(|e| rustler::Error::Term(Box::new(format!("tokenizer encode: {}", e))))
 }
 
-#[cfg(feature = "llm")]
+#[cfg(feature = "tokenizers")]
 #[rustler::nif]
 fn tokenizer_decode_op(
     res: ResourceArc<tokenizer::TokenizerResource>,
@@ -1809,6 +1810,7 @@ fn top_k_indices_f32_op(scores: rustler::Binary, k: usize) -> NifResult<Vec<i32>
 // Always-on (image + fast_image_resize are core deps).
 // ---------------------------------------------------------------
 
+#[cfg(feature = "vision")]
 #[rustler::nif(schedule = "DirtyCpu")]
 fn vision_decode_to_rgb8_op<'a>(
     env: Env<'a>,
@@ -1820,6 +1822,7 @@ fn vision_decode_to_rgb8_op<'a>(
     Ok((bin, w, h))
 }
 
+#[cfg(feature = "vision")]
 #[rustler::nif(schedule = "DirtyCpu")]
 fn vision_load_for_classifier_op<'a>(
     env: Env<'a>,
@@ -1957,6 +1960,9 @@ fn load(env: Env, _info: rustler::Term) -> bool {
     #[cfg(feature = "llm")]
     {
         rustler::resource!(llama_candle::LlamaResource, env);
+    }
+    #[cfg(feature = "tokenizers")]
+    {
         rustler::resource!(tokenizer::TokenizerResource, env);
     }
     #[cfg(feature = "onnx")]

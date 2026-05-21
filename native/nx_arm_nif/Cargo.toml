@@ -9,46 +9,50 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+# ---- Always on (small, no real way to live without them) ----
 rustler = "0.36"
 rayon = "1.10"
 memmap2 = "0.9"
-
-# Core: small, always-on deps. ~1 MB of binary.
+# f32 GEMM, hand-tuned NEON. Used by every matmul. ~500 KB.
 gemm = "0.18"
+# IEEE 754 binary16 + bf16. Used in dozens of small places. ~10 KB.
 half = "2"
-fast_image_resize = "5"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-safetensors = "0.4"
 
-# LLM inference. ~3 MB of binary on top.
-candle-core = { version = "0.8", default-features = false, optional = true }
-candle-transformers = { version = "0.8", default-features = false, optional = true }
-candle-nn = { version = "0.8", default-features = false, optional = true }
-
-# Tokenization. ~1 MB of binary on top. Required when llm is on.
-tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
-
-# Generic ONNX runtime in pure Rust with ARM NEON. ~20 MB of binary —
-# the heaviest crate in this stack. Only pulled in when `onnx` feature
-# is enabled.
-tract-onnx = { version = "0.21", default-features = false, optional = true }
-
-# Audio: decode (Symphonia covers MP3/FLAC/Opus/WAV/Vorbis) +
-# resample (Rubato is the standard rate-converter, used by Whisper
-# pipelines to get 16 kHz mono f32 input).
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "flac", "ogg", "vorbis", "pcm"], optional = true }
-rubato = { version = "0.16", default-features = false, optional = true }
-byteorder = { version = "1", optional = true }
-serde_json = { version = "1", optional = true }
+# ---- Optional, per-capability ----
+# Each feature flag below toggles a coherent capability. Combine
+# them to fit the firmware budget — see docs/size_profile.md for
+# the matrix.
+candle-core         = { version = "0.8",  default-features = false, optional = true }
+candle-transformers = { version = "0.8",  default-features = false, optional = true }
+candle-nn           = { version = "0.8",  default-features = false, optional = true }
+tokenizers          = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+tract-onnx          = { version = "0.21", default-features = false, optional = true }
+symphonia           = { version = "0.5",  default-features = false, features = ["mp3", "wav", "flac", "ogg", "vorbis", "pcm"], optional = true }
+rubato              = { version = "0.16", default-features = false, optional = true }
+image               = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+fast_image_resize   = { version = "5",                                                                  optional = true }
+safetensors         = { version = "0.4",                                                                optional = true }
+byteorder           = { version = "1",                                                                  optional = true }
+serde_json          = { version = "1",                                                                  optional = true }
 
 [features]
-default = ["llm", "onnx", "audio", "whisper"]
-# All-rust LLM stack: candle + tokenizers.
-llm = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers"]
-# tract-onnx — the universal HuggingFace model path. Heavy.
-onnx = ["dep:tract-onnx"]
-# Audio decode + resample for the Whisper / VAD path. Cheap.
-audio = ["dep:symphonia", "dep:rubato"]
-# Speech-to-text via candle-whisper. Requires llm + audio + a couple
-# of small parser/byteorder deps for the mel filters.
-whisper = ["llm", "audio", "dep:byteorder", "dep:serde_json"]
+# `full` is what most users want — every capability we ship.
+default = ["full"]
+full = ["llm", "tokenizers", "onnx", "audio", "vision", "whisper"]
+
+# Atomic capabilities (declare what you actually use):
+llm        = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn"]
+tokenizers = ["dep:tokenizers"]
+onnx       = ["dep:tract-onnx"]
+audio      = ["dep:symphonia", "dep:rubato"]
+vision     = ["dep:image", "dep:fast_image_resize"]
+safetensors = ["dep:safetensors"]
+
+# Composite use-case presets (resolve to atomic features):
+whisper          = ["llm", "tokenizers", "audio", "dep:byteorder", "dep:serde_json"]
+chatbot          = ["llm", "tokenizers"]
+voice-assistant  = ["whisper", "onnx", "vision"]                                  # voice in, optional TTS, optional camera
+yolo             = ["onnx", "vision"]
+piper-tts        = ["onnx", "audio"]
+sentence-rag     = ["onnx", "tokenizers"]
+vision-only      = ["onnx", "vision"]

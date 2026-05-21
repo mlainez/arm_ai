@@ -49,13 +49,23 @@ defmodule NxArm.Native do
     System.get_env("NX_ARM_BUILD") in ["1", "true"] or
       not File.exists?(Path.join([__DIR__, "..", "..", "checksum-Elixir.NxArm.Native.exs"]))
 
-  # Cargo features. `default` already enables `llm` + `onnx`; to slim
-  # the binary set `config :nx_arm, features: ["llm"]` or `[]`.
-  # Honoured by the local-build path (rustler_precompiled passes them
-  # straight to cargo); precompiled releases come with the default set.
+  # Cargo features. The crate's `default` is `full` (every
+  # capability). Override per-application to shrink the binary:
+  #
+  #     config :nx_arm, features: ["chatbot"]           # 10 MB
+  #     config :nx_arm, features: ["whisper"]           # 13 MB
+  #     config :nx_arm, features: ["yolo"]              # 26 MB
+  #     config :nx_arm, features: ["onnx", "vision"]    # compose your own
+  #     config :nx_arm, features: []                    # 2.3 MB core only
+  #
+  # See docs/size_profile.md for the full matrix + presets.
+  # Honoured by the local-build path; precompiled releases on
+  # GitHub always ship the `full` set.
   cargo_features =
-    Application.compile_env(:nx_arm, :features, ["llm", "onnx"])
-    |> Enum.map(&to_string/1)
+    case Application.compile_env(:nx_arm, :features, :default) do
+      :default -> nil
+      list when is_list(list) -> list |> Enum.map(&to_string/1)
+    end
 
   use RustlerPrecompiled,
     otp_app: :nx_arm,
@@ -74,7 +84,11 @@ defmodule NxArm.Native do
       "aarch64-apple-darwin"
     ],
     force_build: force_build?,
-    features: cargo_features,
+    # When user override is given, pass it through to cargo and skip
+    # default features. When unset, let cargo use the crate's
+    # `default` (= `full`) so precompiled tarballs match.
+    features: cargo_features || [],
+    default_features: cargo_features == nil,
     target: @rust_target,
     env: @linker_env
 

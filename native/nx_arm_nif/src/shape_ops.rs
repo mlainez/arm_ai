@@ -1103,12 +1103,10 @@ pub fn rope_f32(
     Ok(out)
 }
 
-/// Bilinear image resize for HWC uint8 inputs. Common entry point
-/// for vision-model preprocessing: camera/JPEG decode produces a
-/// HWC u8 image resize via `fast_image_resize` — SIMD-accelerated
-/// (NEON on aarch64, AVX2/SSE on x86_64). Standard bilinear filter;
-/// the crate also exposes Lanczos, Catmull-Rom, etc. if we want them
-/// later.
+/// Bilinear image resize for HWC uint8 inputs. SIMD-accelerated via
+/// `fast_image_resize` (NEON on aarch64, AVX2/SSE on x86_64).
+/// Gated by the `vision` Cargo feature.
+#[cfg(feature = "vision")]
 pub fn bilinear_resize_u8(
     input: &[u8],
     in_h: usize,

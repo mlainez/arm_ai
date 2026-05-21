@@ -336,63 +336,71 @@ defmodule NxArm.Models.Llama do
     k_roped = NxArm.LLM.rope(Nx.reshape(k, {1, seq, nkv, hd}), positions, model.inv_freq)
                 |> Nx.reshape({nkv, seq, hd})
 
-    # Push K/V into cache as {n_layers, n_kv_heads, 1, head_dim} per step.
+    # Push the whole (seq) of K and V into this layer's cache slot,
+    # one timestep at a time. No more 22-layer zero-tensor allocation.
     cache =
       Enum.reduce(0..(seq - 1), cache, fn t, c_acc ->
-        kt =
-          Nx.slice(k_roped, [0, t, 0], [nkv, 1, hd])
-          |> Nx.reshape({1, nkv, 1, hd})
-          |> pad_layer(layer_idx, model.config.n_layers)
-
-        vt =
-          Nx.slice(v, [0, t, 0], [nkv, 1, hd])
-          |> Nx.reshape({1, nkv, 1, hd})
-          |> pad_layer(layer_idx, model.config.n_layers)
-
-        NxArm.KVCache.append(c_acc, kt, vt)
+        kt = Nx.slice(k_roped, [0, t, 0], [nkv, 1, hd])
+        vt = Nx.slice(v,        [0, t, 0], [nkv, 1, hd])
+        NxArm.KVCache.append_layer(c_acc, layer_idx, kt, vt)
       end)
 
-    # Read the live K/V prefix for this layer.
-    {k_all, v_all} = NxArm.KVCache.layer(cache, layer_idx)
-    # k_all: {n_kv_heads, length, head_dim}, v_all: same.
+    # On the last layer of this timestep, the caller advances the
+    # cursor. We do it after every layer here to keep the API simple;
+    # length will be the same after every layer for the same step.
+    cache =
+      if layer_idx == model.config.n_layers - 1 do
+        # Advance once per timestep for all `seq` steps we wrote.
+        Enum.reduce(1..seq, cache, fn _, c -> NxArm.KVCache.advance(c) end)
+      else
+        cache
+      end
 
-    # GQA expansion: each query head attends to floor(n_heads / n_kv_heads)
-    # consecutive KV heads. If nh == nkv, this is identity.
+    # Cache "view length" — the prefix this layer's attention should
+    # see is (existing length) + (this step's writes), regardless of
+    # whether the cursor has bumped yet.
+    view_length = cache.length + if(layer_idx == model.config.n_layers - 1, do: 0, else: seq)
+
+    {k_all_layer, v_all_layer} =
+      layer_view_with_length(cache, layer_idx, view_length, nkv, hd)
+
+    # GQA expansion: each query head attends to floor(n_heads /
+    # n_kv_heads) consecutive KV heads. We expand K and V along the
+    # head dimension via Nx.broadcast over a reshape so one batched
+    # matmul covers all heads.
     head_groups = div(nh, nkv)
 
-    # Compute attention scores: Q @ K^T, then mask + softmax + @ V.
-    scale = 1.0 / :math.sqrt(hd * 1.0)
-
-    attn_out =
-      for h <- 0..(nh - 1), into: [] do
-        kv_h = div(h, head_groups)
-        q_h = Nx.slice(q_roped, [h, 0, 0], [1, seq, hd]) |> Nx.reshape({seq, hd})
-        k_h = Nx.slice(k_all, [kv_h, 0, 0], [1, cache.length, hd]) |> Nx.reshape({cache.length, hd})
-        v_h = Nx.slice(v_all, [kv_h, 0, 0], [1, cache.length, hd]) |> Nx.reshape({cache.length, hd})
-
-        scores = Nx.dot(q_h, [1], k_h, [1]) |> Nx.multiply(scale)
-
-        # Causal mask: only positions ≤ q-position are allowed. Since
-        # the cache prefix grows monotonically, for query t at start_pos
-        # we mask anything > start_pos + t.
-        scores_masked = apply_causal_mask(scores, seq, cache.length, start_pos)
-
-        m = Nx.reduce_max(scores_masked, axes: [-1], keep_axes: true)
-        e = Nx.exp(Nx.subtract(scores_masked, m))
-        s = Nx.sum(e, axes: [-1], keep_axes: true)
-        attn = Nx.divide(e, s)
-
-        Nx.dot(attn, [1], v_h, [0])
+    {k_expanded, v_expanded} =
+      if head_groups == 1 do
+        {k_all_layer, v_all_layer}
+      else
+        k_e = expand_kv_heads(k_all_layer, head_groups, nh, view_length, hd)
+        v_e = expand_kv_heads(v_all_layer, head_groups, nh, view_length, hd)
+        {k_e, v_e}
       end
-      |> Nx.stack()
+
+    # Batched attention: one Nx.dot for Q@K^T across all heads.
+    # Q: {nh, seq, hd}, K_expanded: {nh, view_length, hd}.
+    # Result: {nh, seq, view_length}.
+    scale = 1.0 / :math.sqrt(hd * 1.0)
+    scores = Nx.dot(q_roped, [2], [0], k_expanded, [2], [0]) |> Nx.multiply(scale)
+    scores_masked = apply_causal_mask_batched(scores, seq, view_length, start_pos, nh)
+
+    m = Nx.reduce_max(scores_masked, axes: [-1], keep_axes: true)
+    e = Nx.exp(Nx.subtract(scores_masked, m))
+    s = Nx.sum(e, axes: [-1], keep_axes: true)
+    attn = Nx.divide(e, s)
+
+    # attn: {nh, seq, view_length}, V_expanded: {nh, view_length, hd}.
+    # Result: {nh, seq, hd} → flatten heads → {seq, d}.
+    attn_out =
+      Nx.dot(attn, [2], [0], v_expanded, [1], [0])
       |> Nx.transpose(axes: [1, 0, 2])
       |> Nx.reshape({seq, d})
 
-    # Output projection + residual.
     o = matmul_quant_rows(attn_out, layer.w_o, d, seq)
     x1 = Nx.add(x, o)
 
-    # FFN pre-norm + SwiGLU.
     x1_norm = rmsnorm(x1, layer.ffn_norm, model.config.rms_eps)
     gate = matmul_quant_rows(x1_norm, layer.w_gate, model.config.ff_dim, seq)
     up = matmul_quant_rows(x1_norm, layer.w_up, model.config.ff_dim, seq)
@@ -404,30 +412,39 @@ defmodule NxArm.Models.Llama do
     {x_out, cache}
   end
 
-  # Wrap a per-layer K/V step into a full-layer cache shape:
-  # the KV cache stores {n_layers, n_kv_heads, max_seq, head_dim};
-  # append expects {n_layers, n_kv_heads, 1, head_dim}. We supply
-  # a tensor that's zero everywhere except layer `li`.
-  defp pad_layer(t, li, n_layers) do
-    {1, nkv, 1, hd} = Nx.shape(t)
-    zeros = Nx.broadcast(0.0, {n_layers, nkv, 1, hd}) |> Nx.backend_copy(NxArm.Backend)
-    Nx.put_slice(zeros, [li, 0, 0, 0], t)
+  # Layer view, but force-overriding the visible length so attention
+  # can read uncommitted writes from the current timestep.
+  defp layer_view_with_length(cache, layer_idx, length, n_kv_heads, head_dim) do
+    k = Map.fetch!(cache.k_layers, layer_idx)
+    v = Map.fetch!(cache.v_layers, layer_idx)
+    {Nx.slice(k, [0, 0, 0], [n_kv_heads, length, head_dim]),
+     Nx.slice(v, [0, 0, 0], [n_kv_heads, length, head_dim])}
   end
 
-  defp apply_causal_mask(scores, seq, kv_len, start_pos) do
+  # Expand KV heads to match Q-head count. Each KV head broadcasts
+  # to `head_groups` consecutive Q heads. Memory-cheap via broadcast.
+  defp expand_kv_heads(kv, head_groups, n_heads, seq_len, head_dim) do
+    n_kv = div(n_heads, head_groups)
+    # kv: {n_kv, seq_len, head_dim} → {n_kv, 1, seq_len, head_dim}
+    # broadcast → {n_kv, head_groups, seq_len, head_dim}
+    # reshape → {n_heads, seq_len, head_dim}
+    kv
+    |> Nx.reshape({n_kv, 1, seq_len, head_dim})
+    |> Nx.broadcast({n_kv, head_groups, seq_len, head_dim})
+    |> Nx.reshape({n_heads, seq_len, head_dim})
+  end
+
+  defp apply_causal_mask_batched(scores, seq, kv_len, start_pos, _n_heads) do
     if seq == 1 do
-      # Decode step: query is at position `start_pos`, every cached
-      # K up to and including kv_len-1 is in the past, so nothing
-      # to mask in the standard case where kv_len == start_pos + 1.
       scores
     else
-      # Prefill: build a (seq, kv_len) mask where mask[t, j] = -inf
-      # when j > start_pos + t.
       i = Nx.iota({seq, 1}) |> Nx.add(start_pos)
       j = Nx.iota({1, kv_len})
       allowed = Nx.greater_equal(i, j)
       mask = Nx.select(allowed, Nx.tensor(0.0), Nx.tensor(-1.0e9))
-      Nx.add(scores, mask)
+      # mask: {seq, kv_len}; scores: {n_heads, seq, kv_len}.
+      # Broadcast-add via reshape to {1, seq, kv_len}.
+      Nx.add(scores, Nx.reshape(mask, {1, seq, kv_len}))
     end
   end
 

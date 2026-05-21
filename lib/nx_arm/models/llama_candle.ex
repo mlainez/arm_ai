@@ -36,21 +36,25 @@ defmodule NxArm.Models.LlamaCandle do
       {:error, :llm_feature_disabled}
     else
     try do
-      handle = NxArm.Native.llama_candle_load_op(path)
+      case NxArm.Native.llama_candle_load_op(path) do
+        {:error, reason} ->
+          {:error, reason}
 
-      tokenizer =
-        case Keyword.get(opts, :tokenizer) do
-          nil ->
-            nil
+        handle ->
+          tokenizer =
+            case Keyword.get(opts, :tokenizer) do
+              nil ->
+                nil
 
-          tok_path ->
-            case NxArm.Tokenizer.load(tok_path) do
-              {:ok, tok} -> tok
-              {:error, _} -> nil
+              tok_path ->
+                case NxArm.Tokenizer.load(tok_path) do
+                  {:ok, tok} -> tok
+                  {:error, _} -> nil
+                end
             end
-        end
 
-      {:ok, %__MODULE__{handle: handle, tokenizer: tokenizer}}
+          {:ok, %__MODULE__{handle: handle, tokenizer: tokenizer}}
+      end
     rescue
       e -> {:error, e}
     catch

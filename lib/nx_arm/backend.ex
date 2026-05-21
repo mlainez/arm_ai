@@ -121,8 +121,6 @@ defmodule NxArm.Backend do
         put_in(out.data, %__MODULE__{bin: out_bin})
       rescue
         _ -> fallback(:as_type, [out, tensor])
-      catch
-        :error, _ -> fallback(:as_type, [out, tensor])
       end
     end
   end
@@ -335,13 +333,6 @@ defmodule NxArm.Backend do
     end
   end
 
-  defp cpu_matmul_2d_right_transposed(out, left, right, m, n, k) do
-    # left: (M, K) row-major. right: (N, K) row-major, contract on K.
-    # batched_matmul_f32_op already supports right_transposed=true.
-    bin = NxArm.Native.batched_matmul_f32_op(bin_of(left), bin_of(right), 1, m, n, k, true)
-    put_in(out.data, %__MODULE__{bin: bin})
-  end
-
   # Batched 4-D dot for transformer attention: Q @ K^T and attn @ V.
   def dot(out, left, left_contract, left_batch, right, right_contract, right_batch) do
     left_shape = Nx.shape(left)
@@ -382,6 +373,13 @@ defmodule NxArm.Backend do
 
   defp cpu_matmul_2d(out, left, right, m, n, k) do
     bin = NxArm.Native.batched_matmul_f32_op(bin_of(left), bin_of(right), 1, m, n, k, false)
+    put_in(out.data, %__MODULE__{bin: bin})
+  end
+
+  defp cpu_matmul_2d_right_transposed(out, left, right, m, n, k) do
+    # left: (M, K) row-major. right: (N, K) row-major, contract on K.
+    # batched_matmul_f32_op already supports right_transposed=true.
+    bin = NxArm.Native.batched_matmul_f32_op(bin_of(left), bin_of(right), 1, m, n, k, true)
     put_in(out.data, %__MODULE__{bin: bin})
   end
 
@@ -692,6 +690,10 @@ defmodule NxArm.Backend do
     end
   end
 
+  # Nx.Backend unary callbacks (the ones the behaviour actually
+  # declares). `logical_not` / `phase` look like unaries but aren't
+  # listed in `@behaviour Nx.Backend`, so they're emitted separately
+  # below without `@impl true`.
   @all_unary_ops Enum.map(Nx.Shared.unary_math_funs(), &elem(&1, 0)) ++
                    [
                      :bitwise_not,
@@ -705,15 +707,21 @@ defmodule NxArm.Backend do
                      :real,
                      :imag,
                      :is_nan,
-                     :is_infinity,
-                     :logical_not,
-                     :phase
+                     :is_infinity
                    ]
 
   @fallback_unary_ops @all_unary_ops -- Map.keys(@unary_ops)
 
   for op <- @fallback_unary_ops do
     @impl true
+    def unquote(op)(out, tensor) do
+      fallback(unquote(op), [out, tensor])
+    end
+  end
+
+  # Unary-shaped ops Nx exposes but doesn't declare as
+  # `Nx.Backend` callbacks — same fallback shape, no `@impl`.
+  for op <- [:logical_not, :phase] do
     def unquote(op)(out, tensor) do
       fallback(unquote(op), [out, tensor])
     end
@@ -744,8 +752,6 @@ defmodule NxArm.Backend do
       end
     rescue
       _ -> fallback(:pad, [out, tensor, pad_value, padding_config])
-    catch
-      :error, _ -> fallback(:pad, [out, tensor, pad_value, padding_config])
     end
   end
 
@@ -758,8 +764,6 @@ defmodule NxArm.Backend do
       put_in(out.data, %__MODULE__{bin: out_bin})
     rescue
       _ -> fallback(:reverse, [out, tensor, axes])
-    catch
-      :error, _ -> fallback(:reverse, [out, tensor, axes])
     end
   end
 
@@ -779,8 +783,6 @@ defmodule NxArm.Backend do
           put_in(out.data, %__MODULE__{bin: out_bin})
         rescue
           _ -> fallback(:clip, [out, tensor, min, max])
-        catch
-          :error, _ -> fallback(:clip, [out, tensor, min, max])
         end
     end
   end
@@ -885,8 +887,6 @@ defmodule NxArm.Backend do
             put_in(out.data, %__MODULE__{bin: out_bin})
           rescue
             _ -> fallback(:stack, [out, tensors, axis])
-          catch
-            :error, _ -> fallback(:stack, [out, tensors, axis])
           end
         end
     end
@@ -907,8 +907,6 @@ defmodule NxArm.Backend do
         put_in(out.data, %__MODULE__{bin: out_bin})
       rescue
         _ -> fallback(:select, [out, pred, on_true, on_false])
-      catch
-        :error, _ -> fallback(:select, [out, pred, on_true, on_false])
       end
     else
       fallback(:select, [out, pred, on_true, on_false])
@@ -939,8 +937,6 @@ defmodule NxArm.Backend do
         put_in(out.data, %__MODULE__{bin: <<val::8>>})
       rescue
         _ -> fallback(:all, [out, tensor, opts])
-      catch
-        :error, _ -> fallback(:all, [out, tensor, opts])
       end
     else
       fallback(:all, [out, tensor, opts])
@@ -969,8 +965,6 @@ defmodule NxArm.Backend do
         put_in(out.data, %__MODULE__{bin: <<val::8>>})
       rescue
         _ -> fallback(:any, [out, tensor, opts])
-      catch
-        :error, _ -> fallback(:any, [out, tensor, opts])
       end
     else
       fallback(:any, [out, tensor, opts])
@@ -985,8 +979,6 @@ defmodule NxArm.Backend do
         put_in(out.data, %__MODULE__{bin: <<val::float-32-little>>})
       rescue
         _ -> fallback(:product, [out, tensor, opts])
-      catch
-        :error, _ -> fallback(:product, [out, tensor, opts])
       end
     else
       fallback(:product, [out, tensor, opts])
@@ -1031,10 +1023,6 @@ defmodule NxArm.Backend do
           put_in(out.data, %__MODULE__{bin: out_bin})
         rescue
           _ ->
-            fallback_name = if which == :max, do: :argmax, else: :argmin
-            fallback(fallback_name, [out, tensor, opts])
-        catch
-          :error, _ ->
             fallback_name = if which == :max, do: :argmax, else: :argmin
             fallback(fallback_name, [out, tensor, opts])
         end
@@ -1123,10 +1111,6 @@ defmodule NxArm.Backend do
           _ ->
             fallback_name = if which == :sort, do: :sort, else: :argsort
             fallback(fallback_name, [out, tensor, opts])
-        catch
-          :error, _ ->
-            fallback_name = if which == :sort, do: :sort, else: :argsort
-            fallback(fallback_name, [out, tensor, opts])
         end
     end
   end
@@ -1177,10 +1161,6 @@ defmodule NxArm.Backend do
           put_in(out.data, %__MODULE__{bin: out_bin})
         rescue
           _ ->
-            fb = if kind == :add, do: :indexed_add, else: :indexed_put
-            fallback(fb, [out, tensor, indices, updates, opts])
-        catch
-          :error, _ ->
             fb = if kind == :add, do: :indexed_add, else: :indexed_put
             fallback(fb, [out, tensor, indices, updates, opts])
         end
@@ -1245,8 +1225,6 @@ defmodule NxArm.Backend do
           put_in(out.data, %__MODULE__{bin: out_bin})
         rescue
           _ -> fallback(:fft, [out, tensor, opts])
-        catch
-          :error, _ -> fallback(:fft, [out, tensor, opts])
         end
     end
   end
@@ -1267,8 +1245,6 @@ defmodule NxArm.Backend do
           put_in(out.data, %__MODULE__{bin: out_bin})
         rescue
           _ -> fallback(:ifft, [out, tensor, opts])
-        catch
-          :error, _ -> fallback(:ifft, [out, tensor, opts])
         end
     end
   end
@@ -1277,7 +1253,8 @@ defmodule NxArm.Backend do
   def triangular_solve(out, a, b, opts),
     do: fallback(:triangular_solve, [out, a, b, opts])
 
-  @impl true
+  # `lu` is exposed by Nx but isn't a declared Nx.Backend callback —
+  # we still need to satisfy the dispatch table, so no `@impl true`.
   def lu(out, tensor, opts), do: fallback(:lu, [out, tensor, opts])
 
   @impl true
@@ -1401,10 +1378,6 @@ defmodule NxArm.Backend do
         n = Nx.size(pred)
         NxArm.Native.as_type_op(bin_of(pred), dtype_code(Nx.type(pred)), 6, n)
     end
-  end
-
-  defp scalar_to_bin(value, type) do
-    Nx.tensor(value, type: type) |> Nx.to_binary()
   end
 
   defp to_f32_scalar(%Nx.Tensor{} = t) do

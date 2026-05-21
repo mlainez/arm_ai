@@ -70,8 +70,7 @@ defmodule NxArm.LLMTest do
     end
 
     test "matches a hand-decomposed pair rotation" do
-      # head_dim = 2, single token, single head, position = 1.
-      head_dim = 2
+      # head_dim = 2 (single token, single head, position = 1).
       qk = Nx.tensor([[[[3.0, 4.0]]]], type: :f32)
       inv_freq = Nx.tensor([1.0], type: :f32, backend: NxArm.Backend)
       positions = Nx.tensor([1], type: :s64)

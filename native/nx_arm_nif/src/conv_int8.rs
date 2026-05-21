@@ -336,6 +336,7 @@ pub fn conv2d_f32(
 /// Currently only the math kernel is exposed (`winograd_f23_tile`);
 /// wiring into `backend.conv` is future work guarded by shape
 /// detection (kh==kw==3, sh==sw==1, no dilation).
+#[allow(dead_code)]
 pub fn winograd_f23_tile_f32(
     input_tile: &[f32; 16],
     kernel_3x3: &[f32; 9],
@@ -614,7 +615,7 @@ pub fn depthwise_conv2d_f32(
     weight: &[f32],
     bias: Option<&[f32]>,
     out: &mut [f32],
-    n: usize,
+    _n: usize,
     h_in: usize,
     w_in: usize,
     c_in: usize,

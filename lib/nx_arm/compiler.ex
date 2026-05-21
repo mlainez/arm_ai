@@ -228,6 +228,8 @@ defmodule NxArm.Compiler do
     end
   end
 
+  defp try_softmax_divide(_), do: nil
+
   # Accept either a bare sum or a broadcast-wrapped sum.
   defp unwrap_to_sum(%Nx.Tensor{data: %Expr{op: :sum}} = sum_t), do: {:ok, sum_t}
 
@@ -235,8 +237,6 @@ defmodule NxArm.Compiler do
     do: unwrap_to_sum(inner)
 
   defp unwrap_to_sum(_), do: :error
-
-  defp try_softmax_divide(_), do: nil
 
   # softmax composed as `reciprocal(s) * e` (Axon.Activations.softmax form).
   #
@@ -334,6 +334,8 @@ defmodule NxArm.Compiler do
     end
   end
 
+  defp try_gelu(_), do: nil
+
   # `add(erf, 1)` and `add(1, erf)` both legal — Nx commutes constants.
   defp pick_erf_from_add(%Nx.Tensor{data: %Expr{op: :add, args: [a, b]}}) do
     cond do
@@ -344,8 +346,6 @@ defmodule NxArm.Compiler do
   end
 
   defp pick_erf_from_add(_), do: :error
-
-  defp try_gelu(_), do: nil
 
   # In `multiply(a, b)` where one is (add(erf(...), 1)) and the other
   # is `x`, return them in canonical order. Nx may commute factors.
@@ -458,8 +458,6 @@ defmodule NxArm.Compiler do
 
   defp validate_small_positive({:ok, n}) when n > 0.0 and n < 0.1, do: {:ok, n}
   defp validate_small_positive(_), do: :error
-
-  defp try_layernorm(_), do: nil
 
   defp extract_constant(%Nx.Tensor{data: %Expr{op: :constant, args: [n]}}) when is_number(n),
     do: {:ok, n * 1.0}

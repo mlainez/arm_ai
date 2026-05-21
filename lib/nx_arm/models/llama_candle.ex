@@ -57,8 +57,6 @@ defmodule NxArm.Models.LlamaCandle do
       end
     rescue
       e -> {:error, e}
-    catch
-      :error, reason -> {:error, reason}
     end
     end
   end

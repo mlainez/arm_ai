@@ -12,8 +12,6 @@ defmodule NxArm.BumblebeeAxonTest do
 
   use ExUnit.Case, async: false
 
-  import Nx.Defn
-
   defp arm(t), do: Nx.backend_copy(t, NxArm.Backend)
   defp ref(t), do: Nx.backend_copy(t, Nx.BinaryBackend)
 
@@ -29,7 +27,7 @@ defmodule NxArm.BumblebeeAxonTest do
 
     {init_fn, predict_fn} = Axon.build(model)
 
-    params = init_fn.(seed, %{})
+    params = init_fn.(seed, Axon.ModelState.empty())
     out_ref = predict_fn.(params, seed)
 
     # Move every parameter to NxArm.Backend.
@@ -56,7 +54,7 @@ defmodule NxArm.BumblebeeAxonTest do
       |> Nx.divide(20)
       |> Nx.sin()
 
-    params = init_fn.(x, %{})
+    params = init_fn.(x, Axon.ModelState.empty())
     out_ref = predict_fn.(params, x)
 
     arm_params = move_params(params, NxArm.Backend)

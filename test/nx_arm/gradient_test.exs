@@ -37,7 +37,6 @@ defmodule NxArm.GradientTest do
   end
 
   defp arm(t), do: Nx.backend_copy(t, NxArm.Backend)
-  defp ref(t), do: Nx.backend_copy(t, Nx.BinaryBackend)
 
   defp diff_max(a, b) do
     a_ref = Nx.backend_copy(a, Nx.BinaryBackend)

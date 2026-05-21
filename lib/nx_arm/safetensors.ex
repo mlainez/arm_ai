@@ -47,8 +47,6 @@ defmodule NxArm.SafeTensors do
         {:ok, tensors}
       rescue
         e -> {:error, e}
-      catch
-        :error, reason -> {:error, reason}
       end
     end
   end
@@ -71,8 +69,6 @@ defmodule NxArm.SafeTensors do
         {:ok, list}
       rescue
         e -> {:error, e}
-      catch
-        :error, reason -> {:error, reason}
       end
     end
   end

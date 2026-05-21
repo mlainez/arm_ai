@@ -18,12 +18,12 @@ defmodule NxArm.Tokenizer do
   @spec load(Path.t()) :: {:ok, %__MODULE__{}} | {:error, term()}
   def load(path) do
     try do
-      handle = NxArm.Native.tokenizer_load_op(path)
-      {:ok, %__MODULE__{handle: handle}}
+      case NxArm.Native.tokenizer_load_op(path) do
+        {:error, reason} -> {:error, reason}
+        handle -> {:ok, %__MODULE__{handle: handle}}
+      end
     rescue
       e -> {:error, e}
-    catch
-      :error, reason -> {:error, reason}
     end
   end
 

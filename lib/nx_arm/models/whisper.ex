@@ -39,12 +39,12 @@ defmodule NxArm.Models.Whisper do
       {:error, :whisper_feature_disabled}
     else
       try do
-        handle = NxArm.Native.whisper_load_op(model, tokenizer, mel, config)
-        {:ok, %__MODULE__{handle: handle}}
+        case NxArm.Native.whisper_load_op(model, tokenizer, mel, config) do
+          {:error, reason} -> {:error, reason}
+          handle -> {:ok, %__MODULE__{handle: handle}}
+        end
       rescue
         e -> {:error, e}
-      catch
-        :error, reason -> {:error, reason}
       end
     end
   end

@@ -9,13 +9,6 @@ defmodule NxArm.LLM do
   """
 
   @doc """
-  RMSNorm along the last axis: `(x / sqrt(mean(x²) + eps)) * gamma`.
-
-  ## Example
-
-      out = NxArm.LLM.rmsnorm(x, gamma, 1.0e-5)
-  """
-  @doc """
   Fused linear layer: `y = activation(x · W^T + b)`.
 
   * `x` shape: `{M, K}` or `{B, M, K}` (any leading-batch).
@@ -63,6 +56,13 @@ defmodule NxArm.LLM do
     %{x | data: %NxArm.Backend{bin: out_bin}, shape: out_shape, type: {:f, 32}}
   end
 
+  @doc """
+  RMSNorm along the last axis: `(x / sqrt(mean(x²) + eps)) * gamma`.
+
+  ## Example
+
+      out = NxArm.LLM.rmsnorm(x, gamma, 1.0e-5)
+  """
   def rmsnorm(%Nx.Tensor{} = x, %Nx.Tensor{} = gamma, epsilon \\ 1.0e-5) do
     shape = Nx.shape(x) |> Tuple.to_list()
     rank = length(shape)

@@ -81,8 +81,9 @@ defmodule NxArm.Models.Face do
     image4d =
       case Nx.shape(image) do
         {_n, _c, _h, _w} -> image
+        # 3-D inputs are taken as CHW (matches NxArm.Vision.load_for_classifier
+        # `layout: :nchw`). NHWC callers should reshape before calling.
         {c, h, w} -> Nx.reshape(image, {1, c, h, w})
-        {h, w, c} -> Nx.reshape(image, {1, c, h, w})
       end
 
     outputs = NxArm.Models.Onnx.run(onnx, %{input_name => image4d})

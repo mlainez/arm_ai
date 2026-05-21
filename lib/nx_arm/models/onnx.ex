@@ -42,8 +42,6 @@ defmodule NxArm.Models.Onnx do
         {:ok, %__MODULE__{handle: handle, input_names: input_names, output_names: output_names}}
       rescue
         e -> {:error, e}
-      catch
-        :error, reason -> {:error, reason}
       end
     end
   end

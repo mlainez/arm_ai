@@ -65,6 +65,7 @@ fn bytes_to_bin<'a>(env: Env<'a>, v: &[u8]) -> NifResult<rustler::Binary<'a>> {
 /// Allocate a fresh `OwnedBinary` of `n_elements * 4` bytes and view it
 /// as a `&mut [f32]`. Used by NIFs that can write directly into the
 /// output buffer, skipping the Vec<f32> intermediate + memcpy pair.
+#[allow(dead_code)]
 fn alloc_f32_bin(n_elements: usize) -> NifResult<(OwnedBinary, *mut f32)> {
     let bin = OwnedBinary::new(n_elements * 4)
         .ok_or_else(|| rustler::Error::Term(Box::new("OwnedBinary alloc failed".to_string())))?;
@@ -2058,23 +2059,32 @@ fn whisper_transcribe_op(
         .map_err(|e| rustler::Error::Term(Box::new(format!("whisper transcribe: {}", e))))
 }
 
+// `rustler::resource!` expands to an `impl rustler::Resource` *inside*
+// this function — Rust 2025 rightly warns about non-local impls. The
+// macro is the only API rustler 0.36 exposes for resource registration,
+// so the warning is suppressed at the call site rather than rewritten.
+#[allow(non_local_definitions)]
 fn load(env: Env, _info: rustler::Term) -> bool {
-    rustler::resource!(MmapResource, env);
+    // `rustler::resource!` returns `bool` (true on success). We don't
+    // act on the result here — rustler also logs a stderr message
+    // on duplicate registration — but we explicitly discard it to
+    // satisfy `#[must_use]` on the underlying type.
+    let _ = rustler::resource!(MmapResource, env);
     #[cfg(feature = "llm")]
     {
-        rustler::resource!(llama_candle::LlamaResource, env);
+        let _ = rustler::resource!(llama_candle::LlamaResource, env);
     }
     #[cfg(feature = "tokenizers")]
     {
-        rustler::resource!(tokenizer::TokenizerResource, env);
+        let _ = rustler::resource!(tokenizer::TokenizerResource, env);
     }
     #[cfg(feature = "onnx")]
     {
-        rustler::resource!(onnx::OnnxModelResource, env);
+        let _ = rustler::resource!(onnx::OnnxModelResource, env);
     }
     #[cfg(feature = "whisper")]
     {
-        rustler::resource!(whisper_candle::WhisperResource, env);
+        let _ = rustler::resource!(whisper_candle::WhisperResource, env);
     }
     true
 }

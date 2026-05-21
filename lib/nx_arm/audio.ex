@@ -27,15 +27,21 @@ defmodule NxArm.Audio do
   Returns `{tensor, sample_rate, channels}` where `tensor` is shape
   `{n_samples * channels}` on `NxArm.Backend`.
   """
-  @spec decode_file(Path.t()) :: {Nx.Tensor.t(), pos_integer(), pos_integer()}
+  @spec decode_file(Path.t()) ::
+          {Nx.Tensor.t(), pos_integer(), pos_integer()} | {:error, String.t()}
   def decode_file(path) do
     if not function_exported?(NxArm.Native, :audio_decode_file_op, 1) do
       raise "NxArm built without the `audio` feature"
     end
 
-    {bin, sr, channels} = NxArm.Native.audio_decode_file_op(path)
-    samples = Nx.from_binary(bin, :f32) |> Nx.backend_copy(NxArm.Backend)
-    {samples, sr, channels}
+    case NxArm.Native.audio_decode_file_op(path) do
+      {:error, msg} ->
+        {:error, msg}
+
+      {bin, sr, channels} ->
+        samples = Nx.from_binary(bin, :f32) |> Nx.backend_copy(NxArm.Backend)
+        {samples, sr, channels}
+    end
   end
 
   @doc "Mix multi-channel interleaved samples to mono by averaging."

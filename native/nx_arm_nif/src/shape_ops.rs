@@ -15,6 +15,7 @@ unsafe fn prefetch_l1(ptr: *const f32) {
 
 #[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
+#[allow(dead_code)]
 unsafe fn prefetch_l1(_ptr: *const f32) {}
 
 // ── NEON polynomial approximations for exp / sigmoid / tanh ────
@@ -496,7 +497,9 @@ pub fn flash_attention_f32(
         return Err(format!("flash_attn: v len {} != B*H*Sk*D = {}", v.len(), b * h * sk * d));
     }
 
-    let mut out = vec![0.0f32; b * h * sq * d];
+    // Written through a raw pointer inside the parallel closure (one
+    // thread per (batch, head)), so we don't actually rebind `out`.
+    let out = vec![0.0f32; b * h * sq * d];
 
     use rayon::prelude::*;
     // Parallelise across (batch, head). Each thread does the full Sq
@@ -2215,6 +2218,7 @@ pub fn elementwise_binary_f32_into(op: &str, a: &[f32], b: &[f32], out: &mut [f3
 
 /// Vec-returning wrapper kept for ergonomic callers. Internally just
 /// allocates a Vec and calls _into.
+#[allow(dead_code)]
 pub fn elementwise_binary_f32(op: &str, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
     let mut out = vec![0.0f32; a.len()];
     elementwise_binary_f32_into(op, a, b, &mut out)?;
@@ -2271,6 +2275,7 @@ pub fn scalar_binary_f32_into(op: &str, side: &str, a: &[f32], scalar: f32, out:
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn scalar_binary_f32(op: &str, side: &str, a: &[f32], scalar: f32) -> Result<Vec<f32>, String> {
     let mut out = vec![0.0f32; a.len()];
     scalar_binary_f32_into(op, side, a, scalar, &mut out)?;
@@ -2364,6 +2369,7 @@ pub fn elementwise_unary_f32_into(op: &str, a: &[f32], out: &mut [f32]) -> Resul
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn elementwise_unary_f32(op: &str, a: &[f32]) -> Result<Vec<f32>, String> {
     let mut out = vec![0.0f32; a.len()];
     elementwise_unary_f32_into(op, a, &mut out)?;

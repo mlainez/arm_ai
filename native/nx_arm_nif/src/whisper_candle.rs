@@ -11,7 +11,7 @@
 use candle_core::{Device, IndexOp, Tensor};
 use candle_transformers::models::whisper::{
     self as m,
-    audio::{pcm_to_mel, Float},
+    audio::pcm_to_mel,
     Config,
 };
 use std::path::Path;
@@ -27,7 +27,11 @@ pub struct WhisperResource {
     pub eot: u32,
     pub no_timestamps: u32,
     pub transcribe: u32,
-    pub no_speech: u32,
+    // Reserved for the "no-speech" probability threshold path —
+    // populated at load time but not consumed yet. Prefix with `_`
+    // to silence the dead-field warning without changing the wire
+    // format of the resource.
+    pub _no_speech: u32,
 }
 
 pub enum Variant {
@@ -171,7 +175,7 @@ pub fn load(
         eot,
         no_timestamps,
         transcribe,
-        no_speech,
+        _no_speech: no_speech,
     })
 }
 

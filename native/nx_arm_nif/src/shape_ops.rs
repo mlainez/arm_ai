@@ -456,7 +456,156 @@ pub fn batched_matmul_f32(
 ///
 /// Use this for K > 256; below that the unblocked path is fine
 /// (fewer accumulator load/store cycles).
+/// NEON GEMV: y = a · B  where a is (1, K) and B is (K, N) row-major.
+///
+/// The LLM decode hot path: every token-by-token step does several of
+/// these (Q/K/V projections, output projection, FFN gate/up/down,
+/// lm_head). The unfused matmul kernel skips M<4 entirely; that left
+/// decode at ~0.2 GFLOPS pure scalar.
+///
+/// Strategy per j-block of 8 columns: hold two `float32x4_t`
+/// accumulators (one per 4 cols), broadcast a single `a[k]` scalar,
+/// load two 4-wide B rows, do 2 FMAs. The columns are an embarrassingly
+/// parallel split over rayon so the perf-cluster threads each take a
+/// chunk of N.
+///
+/// Threshold check: for tiny N (say <64) the rayon dispatch costs more
+/// than the work itself, so we stay serial.
+#[cfg(target_arch = "aarch64")]
+pub fn gemv_f32_neon(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize) {
+    use core::arch::aarch64::*;
+    use rayon::prelude::*;
+
+    debug_assert_eq!(a.len(), k);
+    debug_assert_eq!(b.len(), k * n);
+    debug_assert_eq!(c.len(), n);
+
+    // The j-loop body. Captures `a` and `b`; takes mutable access to
+    // a contiguous slice of `c`. Each call computes `c[j..j+len] =
+    // a · B[:, j..j+len]`.
+    let work = |j0: usize, c_chunk: &mut [f32]| {
+        let len = c_chunk.len();
+        let mut j = 0;
+
+        // 8-col blocks: two 4-wide accumulators.
+        while j + 8 <= len {
+            let col = j0 + j;
+            unsafe {
+                let mut acc0 = vdupq_n_f32(0.0);
+                let mut acc1 = vdupq_n_f32(0.0);
+
+                let mut kk = 0;
+                // K unrolled by 4 to expose ILP and amortise loads.
+                while kk + 4 <= k {
+                    let a0 = vdupq_n_f32(a[kk]);
+                    let a1 = vdupq_n_f32(a[kk + 1]);
+                    let a2 = vdupq_n_f32(a[kk + 2]);
+                    let a3 = vdupq_n_f32(a[kk + 3]);
+
+                    let b0_0 = vld1q_f32(b.as_ptr().add(kk * n + col));
+                    let b0_1 = vld1q_f32(b.as_ptr().add(kk * n + col + 4));
+                    let b1_0 = vld1q_f32(b.as_ptr().add((kk + 1) * n + col));
+                    let b1_1 = vld1q_f32(b.as_ptr().add((kk + 1) * n + col + 4));
+                    let b2_0 = vld1q_f32(b.as_ptr().add((kk + 2) * n + col));
+                    let b2_1 = vld1q_f32(b.as_ptr().add((kk + 2) * n + col + 4));
+                    let b3_0 = vld1q_f32(b.as_ptr().add((kk + 3) * n + col));
+                    let b3_1 = vld1q_f32(b.as_ptr().add((kk + 3) * n + col + 4));
+
+                    acc0 = vfmaq_f32(acc0, a0, b0_0);
+                    acc1 = vfmaq_f32(acc1, a0, b0_1);
+                    acc0 = vfmaq_f32(acc0, a1, b1_0);
+                    acc1 = vfmaq_f32(acc1, a1, b1_1);
+                    acc0 = vfmaq_f32(acc0, a2, b2_0);
+                    acc1 = vfmaq_f32(acc1, a2, b2_1);
+                    acc0 = vfmaq_f32(acc0, a3, b3_0);
+                    acc1 = vfmaq_f32(acc1, a3, b3_1);
+
+                    kk += 4;
+                }
+                // K tail (unrolled by 1).
+                while kk < k {
+                    let av = vdupq_n_f32(a[kk]);
+                    let b_lo = vld1q_f32(b.as_ptr().add(kk * n + col));
+                    let b_hi = vld1q_f32(b.as_ptr().add(kk * n + col + 4));
+                    acc0 = vfmaq_f32(acc0, av, b_lo);
+                    acc1 = vfmaq_f32(acc1, av, b_hi);
+                    kk += 1;
+                }
+
+                vst1q_f32(c_chunk.as_mut_ptr().add(j), acc0);
+                vst1q_f32(c_chunk.as_mut_ptr().add(j + 4), acc1);
+            }
+            j += 8;
+        }
+
+        // 4-col tail.
+        while j + 4 <= len {
+            let col = j0 + j;
+            unsafe {
+                let mut acc = vdupq_n_f32(0.0);
+                for kk in 0..k {
+                    let av = vdupq_n_f32(a[kk]);
+                    let bv = vld1q_f32(b.as_ptr().add(kk * n + col));
+                    acc = vfmaq_f32(acc, av, bv);
+                }
+                vst1q_f32(c_chunk.as_mut_ptr().add(j), acc);
+            }
+            j += 4;
+        }
+
+        // Scalar tail (n % 4 cols).
+        while j < len {
+            let col = j0 + j;
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += a[kk] * b[kk * n + col];
+            }
+            c_chunk[j] = acc;
+            j += 1;
+        }
+    };
+
+    // Parallelism threshold: below ~64 columns the rayon dispatch
+    // dominates the actual work. Stay serial.
+    if n < 64 {
+        work(0, c);
+        return;
+    }
+
+    // Split columns across rayon workers. Each worker gets a
+    // contiguous chunk of c and reads its slice of B.
+    let chunk = (n + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+    // Round chunk up to a multiple of 8 so the 8-col fast path stays
+    // happy at chunk boundaries.
+    let chunk = ((chunk + 7) / 8) * 8;
+    let chunk = chunk.max(8);
+
+    c.par_chunks_mut(chunk).enumerate().for_each(|(idx, c_chunk)| {
+        let j0 = idx * chunk;
+        work(j0, c_chunk);
+    });
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn gemv_f32_neon(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize) {
+    // Scalar reference for non-aarch64 builds (CI on x86_64).
+    for j in 0..n {
+        let mut acc = 0.0f32;
+        for kk in 0..k {
+            acc += a[kk] * b[kk * n + j];
+        }
+        c[j] = acc;
+    }
+}
+
 pub(crate) fn matmul_2d_neon_blocked(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    // Same M=1 short-circuit as the unblocked path; the K-block loop
+    // never sees enough M to justify the 4-row tile overhead.
+    if m == 1 {
+        gemv_f32_neon(a, b, c, n, k);
+        return;
+    }
+
     const K_BLOCK: usize = 128;
 
     let n_tiles = n / 8;
@@ -690,6 +839,16 @@ unsafe fn matmul_kernel_4x4_accum(
 }
 
 fn matmul_2d_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    // M=1 (LLM decode-step hot path) deserves a dedicated NEON GEMV.
+    // The 4-row tile kernel below skips M<4 entirely, so without this
+    // route every decode-step matmul falls through to scalar code at
+    // ~0.2 GFLOPS. The GEMV broadcast-FMA over N columns sits closer
+    // to 5–10 GFLOPS even on a single core.
+    if m == 1 {
+        gemv_f32_neon(a, b, c, n, k);
+        return;
+    }
+
     // 4-row × 8-col register tile. C has 8 NEON accumulators (2 per row,
     // 4 floats each = 32 output cells per thread per K-loop). Cortex-A73
     // has 32 vector regs, plenty of room.

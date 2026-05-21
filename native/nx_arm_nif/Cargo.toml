@@ -13,13 +13,22 @@ rustler = "0.36"
 rayon = "1.10"
 memmap2 = "0.9"
 
-# Upstream LLM stack — adopted per the "use the crate if it's
-# faster" policy. candle-core ships hand-tuned ARMv8 NEON kernels
-# for Q4_0/Q4_K/Q8_0; candle-transformers ships Llama/Mistral/Phi
-# forwards. See docs/upstream_crates.md for the full inventory.
+# Upstream ML / numeric stack. Per the "use the crate if it's
+# faster, smaller, or better-maintained" policy.
 candle-core = { version = "0.8", default-features = false }
 candle-transformers = { version = "0.8", default-features = false }
 candle-nn = { version = "0.8", default-features = false }
-# GGML quants used via candle's gguf reader (already a candle-core
-# dep transitively; pinning here for clarity).
+# Production f32/f64 GEMM with NEON tuning. Drops our hand-rolled
+# matmul kernels (~700 LOC).
+gemm = "0.18"
+# IEEE 754 half-precision types. Drops our manual f16 bit-twiddling.
 half = "2"
+# SIMD image resize. Drops the bilinear resize NIF.
+fast_image_resize = "5"
+# Generic image I/O for vision pipelines.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# SafeTensors reader. Drops lib/nx_arm/safetensors.ex.
+safetensors = "0.4"
+# HuggingFace tokenizers — fast BPE/WordPiece/SentencePiece. Lets
+# the LLM API take strings instead of token IDs.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }

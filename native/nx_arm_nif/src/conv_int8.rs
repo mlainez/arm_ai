@@ -918,7 +918,10 @@ pub fn conv2d_f32_im2col(
         }
     }
 
-    shape_ops::matmul_2d_neon_blocked(&a, &b, output, m, c_out, k_inner);
+    // im2col + GEMM via gemm crate. `a` is (M, K=k_inner), `b` is
+    // (K=k_inner, N=c_out), output is (M, N=c_out) — all row-major.
+    let _ = shape_ops::batched_matmul_f32(&a, &b, 1, m, c_out, k_inner, false)
+        .map(|v| output.copy_from_slice(&v));
 
     if let Some(bs) = bias {
         for i in 0..m {

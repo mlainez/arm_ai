@@ -52,10 +52,12 @@ defmodule NxArm.MixProject do
       {:tokenizers, "~> 0.5"},
       {:safetensors, "~> 0.1"},
       # CPU governor scoping + big.LITTLE topology — extracted from
-      # nx_arm into its own package since it isn't Nx-specific.
-      {:nerves_cpu, path: "../nerves_cpu"},
+      # nx_arm into its own package. Generic Linux, not Nerves-only.
+      {:cpu_governor, path: "../cpu_governor"},
       # First-boot model downloader — same story.
-      {:nerves_model_hub, path: "../nerves_model_hub"},
+      {:model_hub, path: "../model_hub"},
+      # First-boot F2FS data-partition resize for fwup-based deploys.
+      {:fwup_data_resize, path: "../fwup_data_resize"},
       {:axon, "~> 0.7", only: [:test]},
       {:bumblebee, "~> 0.6", only: [:test]},
       {:rustler, "~> 0.36", optional: true},

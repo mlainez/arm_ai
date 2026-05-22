@@ -1,16 +1,15 @@
 defmodule NxArm.Performance do
   @moduledoc """
-  Scoped CPU governor control. Delegates to `NervesCPU.Performance`
-  in the standalone `nerves_cpu` package — kept here as a thin
-  compatibility shim so internal nx_arm callers
-  (`NxArm.Models.LlamaCandle.generate/2`, etc.) continue to work.
+  Thin shim delegating to `CpuGovernor.Performance` in the
+  standalone `cpu_governor` package. Kept so internal nx_arm
+  callers (model wrappers, etc.) continue working unchanged.
 
-  New code should call `NervesCPU.Performance` directly.
+  New code should call `CpuGovernor.Performance` directly.
   """
 
-  defdelegate with_performance(fun), to: NervesCPU.Performance
-  defdelegate current_governors(cores), to: NervesCPU.Performance
-  defdelegate set_governor(cores, governor), to: NervesCPU.Performance
-  defdelegate restore_governors(prev), to: NervesCPU.Performance
-  defdelegate max_cpu_temp_c(), to: NervesCPU.Performance
+  defdelegate with_performance(fun), to: CpuGovernor.Performance
+  defdelegate current_governors(cores), to: CpuGovernor.Performance
+  defdelegate set_governor(cores, governor), to: CpuGovernor.Performance
+  defdelegate restore_governors(prev), to: CpuGovernor.Performance
+  defdelegate max_cpu_temp_c(), to: CpuGovernor.Performance
 end

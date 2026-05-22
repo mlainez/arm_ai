@@ -79,5 +79,5 @@ defmodule NxArm.Runtime do
           all_cores: [non_neg_integer()],
           source: String.t()
         }
-  def topology, do: NervesCPU.Topology.detect()
+  def topology, do: CpuGovernor.Topology.detect()
 end

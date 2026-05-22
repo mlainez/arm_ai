@@ -68,7 +68,7 @@ defmodule ArmAI.Native do
     end
 
   use RustlerPrecompiled,
-    otp_app: :nx_arm,
+    otp_app: :arm_ai,
     crate: "arm_ai_nif",
     base_url: "https://github.com/marclainez/arm_ai/releases/download/v#{version}",
     version: version,

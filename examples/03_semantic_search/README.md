@@ -7,7 +7,7 @@ an A73 cluster — gemm does the dot product, Rust does the heap.
 This example uses a tiny synthetic 4-D embedding table so it
 runs on a fresh device with no model files. To make it real,
 swap the synthetic table with the output of a sentence encoder
-(MiniLM, MPNet, e5-small) loaded via `NxArm.Models.Onnx`.
+(MiniLM, MPNet, e5-small) loaded via `ArmAI.Onnx`.
 
 ## Set up
 
@@ -45,7 +45,7 @@ linearly. 100k docs × 384 dims ≈ 30 ms.
 Replace the synthetic corpus building with:
 
 ```elixir
-{:ok, encoder} = NxArm.Models.Onnx.load("/root/models/all-MiniLM-L6-v2.onnx")
+{:ok, encoder} = ArmAI.Onnx.load("/root/models/all-MiniLM-L6-v2.onnx")
 {:ok, tok}     = Tokenizers.Tokenizer.from_file("/root/models/all-MiniLM-L6-v2-tokenizer.json")
 
 defp encode(text) do
@@ -53,7 +53,7 @@ defp encode(text) do
   ids = Tokenizers.Encoding.get_ids(enc)
   attn = List.duplicate(1, length(ids))
 
-  outputs = NxArm.Models.Onnx.run(encoder, %{
+  outputs = ArmAI.Onnx.run(encoder, %{
     "input_ids"      => Nx.tensor([ids], type: :s64) |> Nx.as_type(:f32) |> Nx.backend_copy(NxArm.Backend),
     "attention_mask" => Nx.tensor([attn], type: :s64) |> Nx.as_type(:f32) |> Nx.backend_copy(NxArm.Backend)
   })
@@ -62,7 +62,7 @@ defp encode(text) do
   outputs["last_hidden_state"]
   |> Nx.mean(axes: [1])
   |> Nx.squeeze()
-  |> NxArm.Embeddings.l2_normalize()
+  |> ArmAI.Embeddings.l2_normalize()
 end
 ```
 

@@ -33,7 +33,7 @@ IO.puts("Running prediction...")
 {us, output} = :timer.tc(fn -> Axon.predict(model, params, inputs, compiler: Nx.Defn.Evaluator) end)
 
 logits = output.logits |> Nx.squeeze()
-top5 = NxArm.Embeddings.top_k(Nx.negate(Nx.negate(logits)), 5) |> Nx.to_flat_list()
+top5 = ArmAI.Embeddings.top_k(Nx.negate(Nx.negate(logits)), 5) |> Nx.to_flat_list()
 
 IO.puts("")
 IO.puts("Forward pass: #{div(us, 1000)} ms")

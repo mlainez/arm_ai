@@ -9,9 +9,9 @@ on (a) being a great Nx backend, (b) wiring upstream into the Nerves
 
 | Crate | What it gives us | Status |
 |---|---|---|
-| `candle-core` | Rust ML framework, ARM NEON kernels for Q4_0 / Q4_K / Q8_0, GGUF loader | **Adopt for `NxArm.Models.Llama` and quantised matmul** |
+| `candle-core` | Rust ML framework, ARM NEON kernels for Q4_0 / Q4_K / Q8_0, GGUF loader | **Adopt for `ArmAI.Llama` and quantised matmul** |
 | `candle-transformers` | Llama-1/2/3, Mistral, Phi-3, Qwen, Gemma forward passes | **Adopt — kills our hand-rolled `models/llama.ex`** |
-| `candle-nn` | Linear, RMSNorm, RoPE, scaled-dot-product attention | **Adopt — replaces `NxArm.LLM.*` for the LLM path** |
+| `candle-nn` | Linear, RMSNorm, RoPE, scaled-dot-product attention | **Adopt — replaces `ArmAI.LLM.*` for the LLM path** |
 | `mistralrs` | Paged attention, speculative decoding, faster decode loop | Watch — adopt for >1B param production runs |
 | `llm` (rustformers) | Older Rust LLM runtime | Skip (candle covers it) |
 
@@ -70,7 +70,7 @@ on (a) being a great Nx backend, (b) wiring upstream into the Nerves
 ## Migration order (proposed)
 
 1. **`gemm`** for f32 matmul — kills hand-tuned `matmul_2d_neon_blocked`, expected better perf on every shape.
-2. **`candle-core` + `candle-transformers`** for Llama — kills `NxArm.Models.Llama` internals, expected 3–5× decode tok/s on FP3.
+2. **`candle-core` + `candle-transformers`** for Llama — kills `ArmAI.Llama` internals, expected 3–5× decode tok/s on FP3.
 3. **`tokenizers`** — lets the public API take strings.
 4. **`safetensors` + `half`** — drops two hand-rolled chunks of decoder code.
 5. **`tract-onnx`** when a Bumblebee user actually needs it.

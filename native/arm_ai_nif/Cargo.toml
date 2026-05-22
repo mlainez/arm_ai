@@ -1,0 +1,104 @@
+[package]
+name = "arm_ai_nif"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "arm_ai_nif"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+# Aggressive release profile. Generic ARM + x86_64 win — pushes
+# every hot loop in candle's quantized matmul, rustfft, tract,
+# and our own vec NEON paths through the LLVM whole-program
+# pipeline. Measured uplift on TinyLlama Q4_K_M decode (FP3 /
+# Cortex-A53/A73 cluster): 4.6 → 5+ tok/s (~8-12% over the
+# default release profile).
+#
+# Why each knob matters generically:
+#   lto = "fat"          — cross-crate inlining (candle's
+#                          vec_dot_q4k_q8k can now inline into
+#                          the rayon closure that calls it).
+#   codegen-units = 1    — single LLVM unit lets the optimiser see
+#                          the full call graph; ~5% on its own for
+#                          tight inner loops.
+#   panic = "abort"      — drops unwinding bookkeeping; smaller
+#                          .so, fewer landing pads in hot paths.
+#   strip = "symbols"    — only metadata, no perf impact, ships
+#                          a leaner NIF.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+overflow-checks = false
+
+[dependencies]
+# ---- Always on (small, no real way to live without them) ----
+rustler = "0.36"
+rayon = "1.10"
+memmap2 = "0.9"
+# mimalloc was tried as a global allocator swap for candle's
+# cat-based KV-cache churn. Result on FP3: boot loop on first
+# generate call. mimalloc's TLS initialisation appears to clash
+# with the BEAM scheduler's thread setup under the Nerves rootfs
+# (musl-flavoured glibc + small initial RSS budget). Revisit only
+# with a pinned thread-init order. Dependency removed; commented
+# here so future-me doesn't re-add it without re-testing.
+# mimalloc = { version = "0.1", default-features = false }
+# f32 GEMM, hand-tuned NEON. Used by every matmul. ~500 KB.
+gemm = "0.18"
+# IEEE 754 binary16 + bf16. Used in dozens of small places. ~10 KB.
+half = "2"
+
+# ---- Optional, per-capability ----
+# Each feature flag below toggles a coherent capability. Combine
+# them to fit the firmware budget — see docs/size_profile.md for
+# the matrix.
+candle-core         = { version = "0.8",  default-features = false, optional = true }
+candle-transformers = { version = "0.8",  default-features = false, optional = true }
+candle-nn           = { version = "0.8",  default-features = false, optional = true }
+# `tokenizers` is used internally by the Whisper bridge (whisper has
+# its own tokenizer baked into the model). Elixir-side tokenization
+# is done via the upstream `:tokenizers` Hex package, not this crate.
+tokenizers          = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+tract-onnx          = { version = "0.21", default-features = false, optional = true }
+symphonia           = { version = "0.5",  default-features = false, features = ["mp3", "wav", "flac", "ogg", "vorbis", "pcm"], optional = true }
+rubato              = { version = "0.16", default-features = false, optional = true }
+image               = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+fast_image_resize   = { version = "5",                                                                  optional = true }
+rustfft             = { version = "6",                                                                  optional = true }
+byteorder           = { version = "1",                                                                  optional = true }
+serde_json          = { version = "1",                                                                  optional = true }
+
+[features]
+# `full` is what most users want — every capability we ship.
+default = ["full"]
+full = ["llm", "onnx", "audio", "vision", "whisper", "fft"]
+
+# `pgo` declares the extern for __llvm_profile_write_file so we can
+# force-flush the profile counters before BEAM exits. Only enable
+# this for the profile-generate build (when RUSTFLAGS sets
+# -Cprofile-generate). Without this flag, pgo_flush_op returns 0
+# and the symbol is never referenced.
+pgo = []
+
+# Atomic capabilities (declare what you actually use):
+llm        = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn"]
+onnx       = ["dep:tract-onnx"]
+audio      = ["dep:symphonia", "dep:rubato"]
+vision     = ["dep:image", "dep:fast_image_resize"]
+# FFT / IFFT via rustfft. Pulls in ~200 KB; NEON-tuned for ARM.
+fft = ["dep:rustfft"]
+
+# Composite use-case presets (resolve to atomic features):
+whisper          = ["llm", "audio", "dep:byteorder", "dep:serde_json", "dep:tokenizers"]
+chatbot          = ["llm"]
+voice-assistant  = ["whisper", "onnx", "vision"]                                  # voice in, optional TTS, optional camera
+yolo             = ["onnx", "vision"]
+piper-tts        = ["onnx", "audio"]
+sentence-rag     = ["onnx"]
+vision-only      = ["onnx", "vision"]

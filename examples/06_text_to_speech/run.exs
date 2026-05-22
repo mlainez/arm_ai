@@ -10,7 +10,7 @@
 # cross-compile cleanly.
 #
 # This example uses the built-in tiny English G2P
-# (NxArm.Phonemizer.simple_english_phonemize) so the demo runs
+# (ArmAI.Phonemizer.simple_english_phonemize) so the demo runs
 # without any external dependency. Production users should plug
 # in a real phonemizer.
 # ---------------------------------------------------------------
@@ -24,12 +24,12 @@ unless File.exists?(model_path) do
 end
 
 IO.puts("Loading Piper voice...")
-{:ok, piper} = NxArm.Models.Piper.load(model_path, sample_rate: 22050)
+{:ok, piper} = ArmAI.Piper.load(model_path, sample_rate: 22050)
 
 text = "Hello world. This is your Nerves device speaking."
 
 IO.puts("Phonemizing: \"#{text}\"")
-phonemes = NxArm.Phonemizer.simple_english_phonemize(text)
+phonemes = ArmAI.Phonemizer.simple_english_phonemize(text)
 IO.inspect(phonemes, label: "phonemes")
 
 # A real Piper voice ships a phoneme_id_map in its .onnx.json config.
@@ -38,13 +38,13 @@ IO.inspect(phonemes, label: "phonemes")
 unique = phonemes |> Enum.uniq()
 phoneme_id_map = unique |> Enum.with_index() |> Enum.into(%{})
 
-ids = NxArm.Phonemizer.to_phoneme_ids(phonemes, phoneme_id_map)
+ids = ArmAI.Phonemizer.to_phoneme_ids(phonemes, phoneme_id_map)
 IO.inspect(ids, label: "phoneme IDs")
 
 IO.puts("Synthesizing audio...")
-{us, samples} = :timer.tc(fn -> NxArm.Models.Piper.synthesize(piper, ids) end)
+{us, samples} = :timer.tc(fn -> ArmAI.Piper.synthesize(piper, ids) end)
 IO.puts("  → #{Nx.size(samples)} samples (#{Float.round(Nx.size(samples) / 22_050, 2)} s) in #{div(us, 1000)} ms")
 
 out_path = "/root/tts_output.wav"
-:ok = NxArm.Audio.write_wav(out_path, samples, sample_rate: 22_050)
+:ok = ArmAI.Audio.write_wav(out_path, samples, sample_rate: 22_050)
 IO.puts("Wrote #{out_path}")

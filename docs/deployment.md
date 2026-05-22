@@ -48,7 +48,7 @@ toolchain is no longer required on the build host either.
 
 ## big.LITTLE topology
 
-`NxArm.Application` detects the CPU topology at boot. On
+`ArmAI.Application` detects the CPU topology at boot. On
 heterogeneous chips (e.g. FP3 / Snapdragon 632 with 4× A73 + 4×
 A53) the rayon worker threads pin themselves to the perf cluster
 and the BEAM dirty CPU schedulers migrate there too.
@@ -57,7 +57,7 @@ To inspect or override:
 
 ```elixir
 # Diagnostics
-NxArm.Runtime.topology()
+ArmAI.Runtime.topology()
 # %{source: "cpu_capacity", perf_cores: [4, 5, 6, 7], all_cores: [0..7]}
 
 # Force a specific thread count (no pinning)
@@ -81,8 +81,8 @@ config :nx_arm, thread_pool: :all_cores
 
 ```elixir
 # In the device's iex
-NxArm.Runtime.topology()
-NxArm.Runtime.thread_count()
+ArmAI.Runtime.topology()
+ArmAI.Runtime.thread_count()
 
 # Quick correctness check
 Nx.iota({4, 4}, type: :f32)
@@ -92,5 +92,5 @@ Nx.iota({4, 4}, type: :f32)
 
 # Microbench: the cache-blocked matmul should hit several GFLOPS
 # on any aarch64 board.
-NxArm.Bench.TinyLM.run(seq_prefill: 16, n_decode: 4)
+ArmAI.Bench.TinyLM.run(seq_prefill: 16, n_decode: 4)
 ```

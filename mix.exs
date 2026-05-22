@@ -1,17 +1,20 @@
-defmodule NxArm.MixProject do
+defmodule ArmAI.MixProject do
   use Mix.Project
+
+  @version "0.1.0"
 
   def project do
     [
-      app: :nx_arm,
-      version: "0.1.0",
-      elixir: "~> 1.18",
+      app: :arm_ai,
+      version: @version,
+      elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      name: "NxArm",
-      description: "Nx backend for ARM CPUs via NEON intrinsics",
-      docs: docs(),
+      name: "ArmAI",
+      description:
+        "Edge AI inference NIF for ARM CPUs — Llama / Whisper / ONNX via Candle + tract-onnx, with hand-tuned NEON kernels",
+      docs: [main: "readme", extras: ["README.md"]],
       package: package()
     ]
   end
@@ -22,47 +25,36 @@ defmodule NxArm.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {NxArm.Application, []}
-    ]
-  end
-
-  def docs do
-    [
-      main: "readme",
-      extras: ["README.md", "docs/deployment.md"]
+      mod: {ArmAI.Application, []}
     ]
   end
 
   def package do
     [
-      name: :nx_arm,
+      name: :arm_ai,
       licenses: ["Apache-2.0"],
-      files: ~w(lib native/nx_arm_nif/src native/nx_arm_nif/Cargo.toml
-                native/nx_arm_nif/Cargo.lock README.md docs mix.exs
-                checksum-Elixir.NxArm.Native.exs),
-      links: %{"GitHub" => "https://github.com/marclainez/nx_arm"}
+      files: ~w(lib native/arm_ai_nif/src native/arm_ai_nif/Cargo.toml
+                native/arm_ai_nif/Cargo.lock README.md mix.exs
+                checksum-Elixir.ArmAI.Native.exs),
+      links: %{"GitHub" => "https://github.com/marclainez/arm_ai"}
     ]
   end
 
   defp deps do
     [
-      {:nx, "~> 0.9"},
-      # Upstream tokenizer + safetensors (replacing nx_arm's own NIF
-      # wrappers, which were duplicating these crates).
-      {:tokenizers, "~> 0.5"},
-      {:safetensors, "~> 0.1"},
-      # CPU governor scoping + big.LITTLE topology — extracted from
-      # nx_arm into its own package. Generic Linux, not Nerves-only.
+      # CPU governor scoping + topology — used by ArmAI.Performance
+      # and ArmAI.Runtime shim modules. Generic Linux helpers.
       {:cpu_governor, path: "../cpu_governor"},
-      # First-boot model downloader — same story.
+      # First-boot model downloader — used by ArmAI.Hub shim.
       {:model_hub, path: "../model_hub"},
-      # First-boot F2FS data-partition resize for fwup-based deploys.
+      # First-boot F2FS resize — used by ArmAI.StorageResizer shim.
       {:fwup_data_resize, path: "../fwup_data_resize"},
-      {:axon, "~> 0.7", only: [:test]},
-      {:bumblebee, "~> 0.6", only: [:test]},
+      # HF tokenizers — used by ArmAI.LlamaCandle for string prompts.
+      # Itself NIF-wrapped, no Nx dep. Optional from arm_ai's POV;
+      # if absent, only the token-id-list prompt API works.
+      {:tokenizers, "~> 0.5", optional: true},
       {:rustler, "~> 0.36", optional: true},
-      {:rustler_precompiled, "~> 0.8"},
-      {:stream_data, "~> 1.1", only: [:test]}
+      {:rustler_precompiled, "~> 0.8"}
     ]
   end
 end

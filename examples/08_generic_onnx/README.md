@@ -1,6 +1,6 @@
 # 08 — Generic ONNX model
 
-Shows that `NxArm.Models.Onnx` is a working tract-onnx bridge:
+Shows that `ArmAI.Onnx` is a working tract-onnx bridge:
 load any ONNX file, inspect its input/output specs, run a forward
 pass. Use this as a starting point for any ONNX model whose ops
 tract supports (most CV models, many small audio models, plenty
@@ -16,7 +16,7 @@ Copy `config.exs` into `config/target.exs`,
 
 ## Honest status
 
-`NxArm.Models.Onnx.load/1` was exercised on FP3 with
+`ArmAI.Onnx.load/1` was exercised on FP3 with
 `yolov8n.onnx` (~12 MB) — load returned a tract `Unimplemented`
 error for the model's `Upsample` op. That confirms the NIF path
 is reaching tract-onnx; what matters in practice is which model

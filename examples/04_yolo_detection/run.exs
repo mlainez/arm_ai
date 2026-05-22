@@ -19,16 +19,16 @@ model_path = "/root/models/yolov5n.onnx"
 
 unless File.exists?(model_path) and File.exists?(image_path) do
   IO.puts("Missing #{model_path} or #{image_path}.")
-  IO.puts("See config.exs for the NxArm.Hub config that fetches the model.")
+  IO.puts("See config.exs for the ArmAI.Hub config that fetches the model.")
   System.halt(1)
 end
 
 IO.puts("Loading YOLOv5n...")
-{:ok, yolo} = NxArm.Models.YOLO.load(model_path, layout: :v5, input_shape: {640, 640})
+{:ok, yolo} = ArmAI.YOLO.load(model_path, layout: :v5, input_shape: {640, 640})
 
 IO.puts("Preprocessing image...")
 input =
-  NxArm.Vision.load_for_classifier(image_path,
+  ArmAI.Vision.load_for_classifier(image_path,
     size: {640, 640},
     layout: :nchw,
     # YOLO expects 0-1 normalised RGB (no ImageNet mean/std).
@@ -39,7 +39,7 @@ input =
 IO.puts("Running detection...")
 {us, detections} =
   :timer.tc(fn ->
-    NxArm.Models.YOLO.detect(yolo, input,
+    ArmAI.YOLO.detect(yolo, input,
       iou_threshold: 0.45,
       score_threshold: 0.25,
       max_output: 50

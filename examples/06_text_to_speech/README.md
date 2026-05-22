@@ -26,9 +26,9 @@ Piper expects eSpeak NG phoneme symbols. Cross-compiling eSpeak NG
 for Nerves is a pain; the recommended pattern is to:
 
 1. Compute phonemes on the host / a server, ship phoneme IDs.
-2. Or use `NxArm.Phonemizer.simple_english_phonemize/1` for
+2. Or use `ArmAI.Phonemizer.simple_english_phonemize/1` for
    quick demos (≈80 word dictionary, naive letter fallback).
-3. Or implement `NxArm.Phonemizer.callback` to point at your own
+3. Or implement `ArmAI.Phonemizer.callback` to point at your own
    G2P (cmudict lookup, neural g2p, whatever).
 
 ## Honest status

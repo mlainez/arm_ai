@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------
 # Example 08 — Run an arbitrary ONNX model.
 #
-# Demonstrates the generic NxArm.Models.Onnx wrapper. Works for
+# Demonstrates the generic ArmAI.Onnx wrapper. Works for
 # any ONNX model whose ops are supported by tract: classifiers,
 # regressors, encoders, pose estimators, depth predictors, etc.
 #
@@ -20,13 +20,13 @@ unless File.exists?(model_path) and File.exists?(image_path) do
 end
 
 IO.puts("Loading ONNX model...")
-{:ok, model} = NxArm.Models.Onnx.load(model_path)
-IO.puts("  inputs:  #{inspect(NxArm.Models.Onnx.input_specs(model))}")
-IO.puts("  outputs: #{inspect(NxArm.Models.Onnx.output_specs(model))}")
+{:ok, model} = ArmAI.Onnx.load(model_path)
+IO.puts("  inputs:  #{inspect(ArmAI.Onnx.input_specs(model))}")
+IO.puts("  outputs: #{inspect(ArmAI.Onnx.output_specs(model))}")
 
 IO.puts("Preprocessing image...")
 input =
-  NxArm.Vision.load_for_classifier(image_path,
+  ArmAI.Vision.load_for_classifier(image_path,
     size: {224, 224},
     layout: :nchw,
     # ImageNet normalisation (MobileNetV2 expects this).
@@ -35,12 +35,12 @@ input =
   )
 
 IO.puts("Running forward pass...")
-{us, [logits]} = :timer.tc(fn -> NxArm.Models.Onnx.run(model, [input]) end)
+{us, [logits]} = :timer.tc(fn -> ArmAI.Onnx.run(model, [input]) end)
 
 # Softmax → top-5.
 probs = Nx.divide(Nx.exp(Nx.subtract(logits, Nx.reduce_max(logits))),
                   Nx.sum(Nx.exp(Nx.subtract(logits, Nx.reduce_max(logits)))))
-top5_idx = NxArm.Embeddings.top_k(Nx.squeeze(probs), 5) |> Nx.to_flat_list()
+top5_idx = ArmAI.Embeddings.top_k(Nx.squeeze(probs), 5) |> Nx.to_flat_list()
 
 IO.puts("")
 IO.puts("Forward pass: #{div(us, 1000)} ms")

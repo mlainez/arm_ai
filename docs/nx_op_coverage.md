@@ -22,7 +22,7 @@ that haven't been wired.
 * FFT / IFFT (complex-64 via rustfft)
 * Window reductions (max-pool, sum-pool, etc.)
 * Softmax / silu fused
-* RMSNorm + RoPE (fused, via `NxArm.LLM`)
+* RMSNorm + RoPE (fused, via `ArmAI.LLM`)
 
 ## Falls back to BinaryBackend
 

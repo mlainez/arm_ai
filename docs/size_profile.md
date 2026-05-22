@@ -9,15 +9,15 @@ firmware proportionally.
 | Feature set | .so size | What you get |
 |---|---|---|
 | `core` (no features) | **2.3 MB** | `NxArm.Backend` (gemm matmul + NEON kernels), topology, governor, storage resizer, KV cache, sampling |
-| `vision` | 6.4 MB | + image decode + bilinear resize, `NxArm.Vision.load_for_classifier/2` |
+| `vision` | 6.4 MB | + image decode + bilinear resize, `ArmAI.Vision.load_for_classifier/2` |
 | `tokenizers` | 6.9 MB | + HuggingFace BPE/WordPiece/SentencePiece |
 | `audio` | 3.9 MB | + symphonia (MP3/WAV/FLAC/Opus/OGG/Vorbis decode) + rubato resample + WAV writer |
-| `onnx` | **22 MB** | + tract-onnx, `NxArm.Models.Onnx` (the heavy one) |
-| `llm + tokenizers` (chatbot preset) | 10 MB | + candle LLM stack — `NxArm.Models.LlamaCandle` |
-| `vision + onnx` (yolo preset) | 26 MB | + `NxArm.Models.YOLO` |
-| `onnx + audio` (piper-tts preset) | 24 MB | + `NxArm.Models.Piper` |
-| `onnx + tokenizers` (sentence-rag preset) | 27 MB | + sentence-transformer ONNX → `NxArm.Embeddings` retrieval |
-| `whisper` (llm + tokenizers + audio + parsers) | 13 MB | + `NxArm.Models.Whisper` (no ONNX path) |
+| `onnx` | **22 MB** | + tract-onnx, `ArmAI.Onnx` (the heavy one) |
+| `llm + tokenizers` (chatbot preset) | 10 MB | + candle LLM stack — `ArmAI.LlamaCandle` |
+| `vision + onnx` (yolo preset) | 26 MB | + `ArmAI.YOLO` |
+| `onnx + audio` (piper-tts preset) | 24 MB | + `ArmAI.Piper` |
+| `onnx + tokenizers` (sentence-rag preset) | 27 MB | + sentence-transformer ONNX → `ArmAI.Embeddings` retrieval |
+| `whisper` (llm + tokenizers + audio + parsers) | 13 MB | + `ArmAI.Whisper` (no ONNX path) |
 | `voice-assistant` (whisper + onnx + vision) | 36 MB | + Silero VAD + Piper TTS + camera vision |
 | `full` (default) | **36 MB** | everything |
 
@@ -60,12 +60,12 @@ config :nx_arm, features: []                                  # raw Nx backend, 
 
 | Feature | Adds | Modules unlocked |
 |---|---|---|
-| `llm` | candle-core + -transformers + -nn | `NxArm.Models.LlamaCandle` |
+| `llm` | candle-core + -transformers + -nn | `ArmAI.LlamaCandle` |
 | `tokenizers` | HF tokenizers | `NxArm.Tokenizer` |
-| `onnx` | tract-onnx | `NxArm.Models.Onnx`, `NxArm.Models.YOLO`, `NxArm.Models.Piper`, `NxArm.Models.SileroVAD` |
-| `audio` | symphonia + rubato | `NxArm.Audio` |
-| `vision` | image + fast_image_resize | `NxArm.Vision`, `bilinear_resize_u8_op` |
-| `whisper` | (implies llm + tokenizers + audio) | `NxArm.Models.Whisper` |
+| `onnx` | tract-onnx | `ArmAI.Onnx`, `ArmAI.YOLO`, `ArmAI.Piper`, `ArmAI.SileroVAD` |
+| `audio` | symphonia + rubato | `ArmAI.Audio` |
+| `vision` | image + fast_image_resize | `ArmAI.Vision`, `bilinear_resize_u8_op` |
+| `whisper` | (implies llm + tokenizers + audio) | `ArmAI.Whisper` |
 
 ## What stays in regardless
 
@@ -73,11 +73,11 @@ Even with `features = []` you still get:
 - `NxArm.Backend` (the Nx.Backend impl with gemm-backed matmul)
 - All elementwise / softmax / silu / conv / quantised matmul NEON NIFs
 - big.LITTLE topology detection + scheduler pinning
-- `NxArm.Performance` (CPU governor scoping)
-- `NxArm.StorageResizer` (F2FS first-boot resize)
-- `NxArm.KVCache`, `NxArm.LLM` (RMSNorm, RoPE), `NxArm.Sampling`
-- `NxArm.Embeddings` (cosine + top-k — backed by gemm, no extra deps)
-- `NxArm.Detection` (NMS — pure Elixir)
+- `ArmAI.Performance` (CPU governor scoping)
+- `ArmAI.StorageResizer` (F2FS first-boot resize)
+- `ArmAI.KVCache`, `ArmAI.LLM` (RMSNorm, RoPE), `ArmAI.Sampling`
+- `ArmAI.Embeddings` (cosine + top-k — backed by gemm, no extra deps)
+- `ArmAI.Detection` (NMS — pure Elixir)
 
 That's the 2.3 MB minimum. Everything above that is the model
 runtime you opt into.
@@ -85,7 +85,7 @@ runtime you opt into.
 ## How it works
 
 `config :nx_arm, features: [...]` is read at compile time by
-`NxArm.Native` and passed to cargo as `--features`. The local-build
+`ArmAI.Native` and passed to cargo as `--features`. The local-build
 path always honours it (e.g. when consuming `nx_arm` as a path dep
 on Nerves). Precompiled binaries on GitHub releases ship the
 `full` set; if you want a slimmer build you `NX_ARM_BUILD=1 mix
@@ -93,9 +93,9 @@ deps.compile nx_arm --force` after setting the config.
 
 ## Behavioural guarantee
 
-Any `NxArm.Models.*` module called without its feature returns
+Any `ArmAI.*` module called without its feature returns
 `{:error, :<feature>_disabled}` — never crashes the BEAM, never
-silently falls back. Check `function_exported?(NxArm.Native,
+silently falls back. Check `function_exported?(ArmAI.Native,
 :<some_op>, n)` to detect a feature at runtime.
 
 ## Recommended profiles per device size

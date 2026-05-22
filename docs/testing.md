@@ -32,7 +32,7 @@ Runnable in seconds, no Nerves toolchain needed.
 | `fp16_test.exs` | f16 ↔ f32 dequant matmul |
 | `gather_test.exs` | Indexed gather, both fast path and n-D fallback |
 | `gradient_test.exs` | Backward-pass support for trainable use |
-| `hub_test.exs` | `NxArm.Hub` — caching, SHA verification, transient failures |
+| `hub_test.exs` | `ArmAI.Hub` — caching, SHA verification, transient failures |
 | `im2col_conv_test.exs` | Generic im2col conv path |
 | `image_test.exs` | Image preprocess transforms |
 | `indexed_test.exs` | `indexed_add` / `indexed_put` |
@@ -118,7 +118,7 @@ For nx_arm *users* (people deploying to a real device):
   scope helps but doesn't bound it.
 * **Power consumption.** Pinning to the perf cluster + holding
   governor "performance" is by design a heat/power tradeoff
-  (`NxArm.Performance` docs cover this).
+  (`ArmAI.Performance` docs cover this).
 * **Cross-arch determinism.** f32 matmul order is rayon-dependent;
   conformance tests assert within tolerance, not bit-exact.
 

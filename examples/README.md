@@ -11,7 +11,7 @@ case on a Nerves ARM device. Every example:
   3B+/4/5, BeagleBone AI, Orange Pi, Jetson Nano, etc. armv7
   works too once you ship the matching precompiled NIF tarball.
 * Tells you exactly which model file(s) to fetch and where to
-  put them (`NxArm.Hub` handles this for you on first boot).
+  put them (`ArmAI.Hub` handles this for you on first boot).
 * Shows the `config :nx_arm, features: […]` you need so you
   ship the smallest firmware that covers the use case.
 
@@ -43,7 +43,7 @@ build it into your own Nerves app and call from your supervisor.
 
 For each example below, I verify on a real FP3 that:
 * The Elixir module compiles into the firmware.
-* `NxArm.Hub.ensure_all/0` downloads the model from HuggingFace
+* `ArmAI.Hub.ensure_all/0` downloads the model from HuggingFace
   to `/root/models/` on boot (when network is up).
 * The example script returns a sensible result (the right type +
   shape, a coherent text string, a non-empty detection list,

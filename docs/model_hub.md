@@ -1,4 +1,4 @@
-# First-boot model downloads (`NxArm.Hub`)
+# First-boot model downloads (`ArmAI.Hub`)
 
 Models can be fetched on first boot from HuggingFace or any HTTPS
 URL, so the firmware itself stays small and the user doesn't have
@@ -23,17 +23,17 @@ config :nx_arm,
   ]
 ```
 
-`NxArm.Application` calls `NxArm.Hub.ensure_all/0` on boot. Missing
+`ArmAI.Application` calls `ArmAI.Hub.ensure_all/0` on boot. Missing
 files are streamed to disk synchronously, then your supervisor
 starts. Successful boots after the first reuse the cached files.
 
 ## Looking up paths at runtime
 
 ```elixir
-{:ok, model_path} = NxArm.Hub.path(:tinyllama)
-{:ok, tok_path}   = NxArm.Hub.path(:tinyllama_tokenizer)
+{:ok, model_path} = ArmAI.Hub.path(:tinyllama)
+{:ok, tok_path}   = ArmAI.Hub.path(:tinyllama_tokenizer)
 
-{:ok, model} = NxArm.Models.LlamaCandle.load(model_path, tokenizer: tok_path)
+{:ok, model} = ArmAI.LlamaCandle.load(model_path, tokenizer: tok_path)
 ```
 
 ## Source forms
@@ -60,12 +60,12 @@ config :nx_arm,
   ]
 ```
 
-If the cached file's SHA doesn't match, `NxArm.Hub` deletes it and
+If the cached file's SHA doesn't match, `ArmAI.Hub` deletes it and
 re-downloads.
 
 ## Networking expectations
 
-`NxArm.Hub` uses Erlang's stdlib `:httpc` — no new Rust crates,
+`ArmAI.Hub` uses Erlang's stdlib `:httpc` — no new Rust crates,
 no extra runtime deps. You're responsible for bringing up
 connectivity before nx_arm starts; on Nerves the typical pattern is
 to let `vintage_net` come up first.
@@ -82,7 +82,7 @@ from scratch. There is no resume support today (planned).
 
 ## Storage location
 
-Combine with `NxArm.StorageResizer`: by default
+Combine with `ArmAI.StorageResizer`: by default
 `/dev/mmcblk0p62p3` is auto-grown to fill the data partition on
 first boot, so a 700 MB TinyLlama GGUF + 50 MB tokenizer fits on
 a stock FP3 image. Models live under `/root/models/` by convention

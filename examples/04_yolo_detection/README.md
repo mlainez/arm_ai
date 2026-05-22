@@ -24,7 +24,7 @@ into tract-onnx with zero conversion. It's also 3.8 MB
 delta on COCO is small enough not to matter for the use cases
 above.
 
-`NxArm.Models.YOLO` ships v5 as the default `:layout`.
+`ArmAI.YOLO` ships v5 as the default `:layout`.
 
 ## Set up
 
@@ -36,7 +36,7 @@ preprocessor resizes to 640×640.
 
 ## Verified on FP3
 
-- `NxArm.Models.Onnx.load("/root/models/yolov5n.onnx")` → succeeds
+- `ArmAI.Onnx.load("/root/models/yolov5n.onnx")` → succeeds
   (tract-onnx 0.21 accepts the opset-17 op set: Conv, Mul,
   Sigmoid, Concat, Add, MaxPool, Reshape, Transpose, Split, Pow,
   Resize, Constant)
@@ -74,10 +74,10 @@ defmodule MyApp.YoloServer do
 
   def detect(image), do: GenServer.call(__MODULE__, {:detect, image}, 5_000)
 
-  def init(_), do: NxArm.Models.YOLO.load("/root/models/yolov5n.onnx", layout: :v5)
+  def init(_), do: ArmAI.YOLO.load("/root/models/yolov5n.onnx", layout: :v5)
 
   def handle_call({:detect, image}, _from, yolo) do
-    {:reply, NxArm.Models.YOLO.detect(yolo, image), yolo}
+    {:reply, ArmAI.YOLO.detect(yolo, image), yolo}
   end
 end
 ```

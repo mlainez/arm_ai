@@ -12,20 +12,20 @@ model_path = "/root/models/silero_vad.onnx"
 
 unless File.exists?(model_path) and File.exists?(audio_path) do
   IO.puts("Missing #{model_path} or #{audio_path}")
-  IO.puts("See config.exs for the NxArm.Hub config that fetches Silero VAD (~1.8 MB).")
+  IO.puts("See config.exs for the ArmAI.Hub config that fetches Silero VAD (~1.8 MB).")
   System.halt(1)
 end
 
 IO.puts("Loading Silero VAD...")
-{:ok, vad} = NxArm.Models.SileroVAD.load(model_path)
+{:ok, vad} = ArmAI.SileroVAD.load(model_path)
 
 IO.puts("Decoding audio...")
-pcm = NxArm.Audio.load_for_whisper(audio_path)
+pcm = ArmAI.Audio.load_for_whisper(audio_path)
 
 IO.puts("Running VAD over #{Float.round(Nx.size(pcm) / 16_000, 2)} s of audio...")
 {us, segments} =
   :timer.tc(fn ->
-    NxArm.Models.SileroVAD.detect(vad, pcm,
+    ArmAI.SileroVAD.detect(vad, pcm,
       threshold: 0.5,
       min_speech_ms: 250,
       min_silence_ms: 100

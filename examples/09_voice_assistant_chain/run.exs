@@ -13,7 +13,7 @@
 audio_in  = "/root/question.wav"
 audio_out = "/root/answer.wav"
 
-# Model paths (NxArm.Hub installs these on first boot — see config.exs).
+# Model paths (ArmAI.Hub installs these on first boot — see config.exs).
 vad_path     = "/root/models/silero_vad.onnx"
 whisper_gguf = "/root/models/whisper-tiny.gguf"
 whisper_tok  = "/root/models/whisper-tokenizer.json"
@@ -30,9 +30,9 @@ unless missing == [] do
 end
 
 IO.puts("== 1. VAD ==")
-{:ok, vad} = NxArm.Models.SileroVAD.load(vad_path)
-pcm = NxArm.Audio.load_for_whisper(audio_in)
-segs = NxArm.Models.SileroVAD.detect(vad, pcm, threshold: 0.5)
+{:ok, vad} = ArmAI.SileroVAD.load(vad_path)
+pcm = ArmAI.Audio.load_for_whisper(audio_in)
+segs = ArmAI.SileroVAD.detect(vad, pcm, threshold: 0.5)
 IO.puts("  → #{length(segs)} speech segments")
 
 # Concat speech-only PCM (skip silence — saves Whisper time).
@@ -50,22 +50,22 @@ speech_pcm =
   end
 
 IO.puts("== 2. Whisper ==")
-{:ok, whisper} = NxArm.Models.WhisperCandle.load(
+{:ok, whisper} = ArmAI.WhisperCandle.load(
   gguf_path: whisper_gguf,
   tokenizer_path: whisper_tok,
   mel_filters_path: whisper_mel
 )
-{:ok, transcript} = NxArm.Models.WhisperCandle.transcribe(whisper, speech_pcm)
+{:ok, transcript} = ArmAI.WhisperCandle.transcribe(whisper, speech_pcm)
 IO.puts("  → \"#{transcript}\"")
 
 IO.puts("== 3. LLM ==")
-{:ok, llm} = NxArm.Models.LlamaCandle.load(llama_gguf)
+{:ok, llm} = ArmAI.LlamaCandle.load(llama_gguf)
 prompt = "Q: #{transcript}\nA:"
 {:ok, tokenizer} = Tokenizers.Tokenizer.from_file("/root/models/tinyllama-tokenizer.json")
 {:ok, prompt_enc} = Tokenizers.Tokenizer.encode(tokenizer, prompt)
 prompt_tokens = Tokenizers.Encoding.get_ids(prompt_enc)
 {response_tokens, _stats} =
-  NxArm.Models.LlamaCandle.generate(llm,
+  ArmAI.LlamaCandle.generate(llm,
     prompt_tokens: prompt_tokens,
     max_new: 48,
     stop_tokens: [2]
@@ -74,11 +74,11 @@ prompt_tokens = Tokenizers.Encoding.get_ids(prompt_enc)
 IO.puts("  → \"#{answer}\"")
 
 IO.puts("== 4. Piper ==")
-{:ok, piper} = NxArm.Models.Piper.load(piper_onnx, sample_rate: 22050)
-phonemes = NxArm.Phonemizer.simple_english_phonemize(answer)
+{:ok, piper} = ArmAI.Piper.load(piper_onnx, sample_rate: 22050)
+phonemes = ArmAI.Phonemizer.simple_english_phonemize(answer)
 phoneme_id_map = phonemes |> Enum.uniq() |> Enum.with_index() |> Enum.into(%{})
-ids = NxArm.Phonemizer.to_phoneme_ids(phonemes, phoneme_id_map)
-samples = NxArm.Models.Piper.synthesize(piper, ids)
-:ok = NxArm.Audio.write_wav(audio_out, samples, sample_rate: 22_050)
+ids = ArmAI.Phonemizer.to_phoneme_ids(phonemes, phoneme_id_map)
+samples = ArmAI.Piper.synthesize(piper, ids)
+:ok = ArmAI.Audio.write_wav(audio_out, samples, sample_rate: 22_050)
 
 IO.puts("Done. Wrote #{audio_out} (#{Float.round(Nx.size(samples) / 22050, 2)} s)")

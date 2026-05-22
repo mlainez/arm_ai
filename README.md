@@ -59,7 +59,7 @@ schedulers to it. Detection priority:
 4. Fallback: use all cores (no pinning).
 
 ```elixir
-iex> NxArm.Runtime.topology()
+iex> ArmAI.Runtime.topology()
 %{source: "cpu_capacity", perf_cores: [4, 5, 6, 7], all_cores: [0..7]}
 ```
 
@@ -87,13 +87,13 @@ matrix and override knobs.
 
 ```elixir
 # Inference: a 2-layer transformer forward
-mask = NxArm.LLM.causal_mask(seq) |> Nx.broadcast({n_heads, seq, seq})
+mask = ArmAI.LLM.causal_mask(seq) |> Nx.broadcast({n_heads, seq, seq})
 x =
   Enum.reduce(layers, x, fn ws, acc ->
-    a = NxArm.LLM.rmsnorm(acc, ws.norm1)
+    a = ArmAI.LLM.rmsnorm(acc, ws.norm1)
     a = attention(a, ws.w_q, ws.w_k, ws.w_v, ws.w_o, mask, n_heads)
     x1 = Nx.add(acc, a)
-    f = NxArm.LLM.rmsnorm(x1, ws.norm2)
+    f = ArmAI.LLM.rmsnorm(x1, ws.norm2)
     Nx.add(x1, ffn(f, ws.w_gate, ws.w_up, ws.w_down))
   end)
 ```

@@ -10,18 +10,18 @@ Layer cake of what runs where, why, and how the pieces talk.
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
 │  HIGH-LEVEL MODEL WRAPPERS (Elixir)                         │
-│  NxArm.Models.LlamaCandle   — quantised Llama family        │
-│  NxArm.Models.WhisperCandle — STT, sliding-window decode    │
-│  NxArm.Models.Onnx          — generic ONNX                  │
-│  NxArm.Models.YOLO          — detection (v5/v8 layouts)     │
-│  NxArm.Models.SileroVAD     — voice activity                │
-│  NxArm.Models.Piper         — text-to-speech                │
-│  NxArm.Models.OCR / .Face / .StableDiffusion                │
+│  ArmAI.LlamaCandle   — quantised Llama family        │
+│  ArmAI.WhisperCandle — STT, sliding-window decode    │
+│  ArmAI.Onnx          — generic ONNX                  │
+│  ArmAI.YOLO          — detection (v5/v8 layouts)     │
+│  ArmAI.SileroVAD     — voice activity                │
+│  ArmAI.Piper         — text-to-speech                │
+│  ArmAI.OCR / .Face / .StableDiffusion                │
 │                                                             │
-│  Helpers: NxArm.Hub, NxArm.Vision, NxArm.Audio,             │
-│           NxArm.Detection, NxArm.Embeddings,                │
-│           NxArm.Phonemizer, NxArm.SafeTensors,              │
-│           NxArm.Tokenizer, NxArm.FFT                        │
+│  Helpers: ArmAI.Hub, ArmAI.Vision, ArmAI.Audio,             │
+│           ArmAI.Detection, ArmAI.Embeddings,                │
+│           ArmAI.Phonemizer, NxArm.SafeTensors,              │
+│           NxArm.Tokenizer, ArmAI.FFT                        │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -30,8 +30,8 @@ Layer cake of what runs where, why, and how the pieces talk.
 │    — implements every Nx.Backend callback                   │
 │    — dispatches to NEON NIFs on the hot path                │
 │    — falls back to Nx.BinaryBackend for niche ops           │
-│    — manages CPU governor scoping via NxArm.Performance     │
-│    — manages rayon thread pool pinning via NxArm.Runtime    │
+│    — manages CPU governor scoping via ArmAI.Performance     │
+│    — manages rayon thread pool pinning via ArmAI.Runtime    │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -86,7 +86,7 @@ Layer cake of what runs where, why, and how the pieces talk.
   user doesn't have to learn nx_arm-specific APIs to get NEON
   acceleration for their Axon model.
 * **Model wrappers vs raw NIF**: high-level wrappers
-  (`NxArm.Models.LlamaCandle`) compose the NIF calls into a
+  (`ArmAI.LlamaCandle`) compose the NIF calls into a
   request → response shape. Raw NIF still callable for users who
   want the building blocks.
 * **Vendored `quantized_llama_inplace.rs`**: candle's upstream

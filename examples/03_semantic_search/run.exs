@@ -15,7 +15,7 @@
 # To make this real:
 #   * Add the sentence encoder to `config :nx_arm, :models, ...`.
 #   * Replace `encode_query/1` and `encode_corpus/1` with
-#     `NxArm.Models.Onnx.run/3` against the loaded model.
+#     `ArmAI.Onnx.run/3` against the loaded model.
 # ---------------------------------------------------------------
 
 # Toy 4-D embedding table representing 6 short documents.
@@ -39,24 +39,24 @@ doc_titles = [
 ]
 
 # L2-normalise once at index time.
-corpus_normed = NxArm.Embeddings.l2_normalize(corpus)
+corpus_normed = ArmAI.Embeddings.l2_normalize(corpus)
 
 # Build a query — in real life this is the encoder output for a
 # user's question. Here we hand-craft something close to docs 0+1.
 query =
   Nx.tensor([0.8, 0.2, 0.0, 0.0])
   |> Nx.backend_copy(NxArm.Backend)
-  |> NxArm.Embeddings.l2_normalize()
+  |> ArmAI.Embeddings.l2_normalize()
 
 # Score + retrieve.
 {us, _} = :timer.tc(fn ->
-  scores = NxArm.Embeddings.cosine_similarity(query, corpus_normed)
-  top3 = NxArm.Embeddings.top_k(scores, 3)
+  scores = ArmAI.Embeddings.cosine_similarity(query, corpus_normed)
+  top3 = ArmAI.Embeddings.top_k(scores, 3)
   {scores, top3}
 end)
 
-scores = NxArm.Embeddings.cosine_similarity(query, corpus_normed)
-top3 = NxArm.Embeddings.top_k(scores, 3)
+scores = ArmAI.Embeddings.cosine_similarity(query, corpus_normed)
+top3 = ArmAI.Embeddings.top_k(scores, 3)
 
 IO.puts("Retrieval over #{length(doc_titles)} docs in #{us} µs")
 IO.puts("")

@@ -9,7 +9,7 @@ on a Fairphone 3 (Cortex-A73 cluster). 638 MB model.
    `config/target.exs`. It does two things:
    * Trims the firmware to `["chatbot"]` (only candle + tokenizers, no
      ONNX or audio crate weight) — **`.so` ≈ 10 MB**.
-   * Tells `NxArm.Hub` to fetch the TinyLlama GGUF + tokenizer on
+   * Tells `ArmAI.Hub` to fetch the TinyLlama GGUF + tokenizer on
      first boot.
 2. `mix firmware && mix upload` — first boot pulls ~640 MB from
    HuggingFace.

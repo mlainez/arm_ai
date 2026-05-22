@@ -21,17 +21,17 @@ unless Enum.all?(required, &File.exists?/1) do
   IO.puts("Missing one or more required files:")
   for p <- required, do: IO.puts("  #{if File.exists?(p), do: "OK", else: "MISSING"}  #{p}")
   IO.puts("")
-  IO.puts("See config.exs for the NxArm.Hub config that downloads the model bundle.")
+  IO.puts("See config.exs for the ArmAI.Hub config that downloads the model bundle.")
   System.halt(1)
 end
 
 IO.puts("Decoding audio at #{audio_path}...")
-pcm = NxArm.Audio.load_for_whisper(audio_path)
+pcm = ArmAI.Audio.load_for_whisper(audio_path)
 IO.puts("  → #{Nx.size(pcm)} samples at 16 kHz (#{Float.round(Nx.size(pcm) / 16_000, 2)} s)")
 
 IO.puts("Loading Whisper...")
 {:ok, whisper} =
-  NxArm.Models.Whisper.load(
+  ArmAI.Whisper.load(
     model: model_path,
     tokenizer: tokenizer_path,
     mel_filters: mel_path,
@@ -39,7 +39,7 @@ IO.puts("Loading Whisper...")
   )
 
 IO.puts("Transcribing...")
-{us, text} = :timer.tc(fn -> NxArm.Models.Whisper.transcribe(whisper, pcm) end)
+{us, text} = :timer.tc(fn -> ArmAI.Whisper.transcribe(whisper, pcm) end)
 
 IO.puts("")
 IO.puts("Transcript (#{div(us, 1000)} ms):")

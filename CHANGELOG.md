@@ -8,7 +8,7 @@
   fallbacks with native NIFs covering the LLM/CV hot path:
   argmax/argmin, select, as_type, clip, pad, gather (axis 0),
   stack (axis 0), sort/argsort, all/any/product, reverse.
-* **big.LITTLE auto-pinning.** `NxArm.Application` detects the perf
+* **big.LITTLE auto-pinning.** `ArmAI.Application` detects the perf
   cluster at boot via `cpu_capacity` / `cpufreq` / `midr_el1` and
   pins both the rayon worker pool and the BEAM dirty CPU
   schedulers to it. Generic ARM CPUs and homogeneous chips are
@@ -27,7 +27,7 @@
   extreme aspect ratios), concurrency stress (16 parallel
   matmuls), NIF robustness (bad inputs, leak detection), and a
   2-layer transformer e2e diff.
-* **LLM helpers.** KV cache (`NxArm.KVCache`), causal +
+* **LLM helpers.** KV cache (`ArmAI.KVCache`), causal +
   decode-step masks, single-position RoPE (`rope_at/3`),
   CTRL-style repetition penalty for sampling.
 * **Model file readers.** GGUF v3 with Q4_0 unpack, SafeTensors,

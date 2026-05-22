@@ -7,11 +7,11 @@ products versus what's still bridge-quality. Updated 2026-05-21.
 
 | Use case | What it does | Verified ceiling |
 |---|---|---|
-| **Quantised LLM chat** (TinyLlama / SmolLM / Phi-Q4) | Q4_K_M GGUF inference via `NxArm.Models.LlamaCandle` | 4.7 tok/s on FP3 (Snapdragon 632, 4× A73 @ 1.8 GHz). 12–15 tok/s on A76+. See [perf_llm.md](perf_llm.md) for the ceiling analysis. |
-| **Sentence embeddings + RAG** | `NxArm.Embeddings` cosine search + top-k | ~700 µs/query for ~10 docs; scales linearly to ~10 k docs |
-| **Image classification** (ViT-tiny, MobileNet, EfficientNet-Q) | Bumblebee/Axon or `NxArm.Models.Onnx` | ViT-tiny warm forward ~3 s on FP3 |
-| **Generic ONNX inference** (conv/gemm/relu/softmax/resize) | `NxArm.Models.Onnx` over tract-onnx 0.21 | Works for most CV models post-2020; older exports need an opset bump (see `examples/04_yolo_detection/export_to_tract_opset.py`) |
-| **Still-image object detection** (yolov5n) | `NxArm.Models.YOLO` with `:v5` layout | ~1 s/image on FP3 at 640×640 fp32 |
+| **Quantised LLM chat** (TinyLlama / SmolLM / Phi-Q4) | Q4_K_M GGUF inference via `ArmAI.LlamaCandle` | 4.7 tok/s on FP3 (Snapdragon 632, 4× A73 @ 1.8 GHz). 12–15 tok/s on A76+. See [perf_llm.md](perf_llm.md) for the ceiling analysis. |
+| **Sentence embeddings + RAG** | `ArmAI.Embeddings` cosine search + top-k | ~700 µs/query for ~10 docs; scales linearly to ~10 k docs |
+| **Image classification** (ViT-tiny, MobileNet, EfficientNet-Q) | Bumblebee/Axon or `ArmAI.Onnx` | ViT-tiny warm forward ~3 s on FP3 |
+| **Generic ONNX inference** (conv/gemm/relu/softmax/resize) | `ArmAI.Onnx` over tract-onnx 0.21 | Works for most CV models post-2020; older exports need an opset bump (see `examples/04_yolo_detection/export_to_tract_opset.py`) |
+| **Still-image object detection** (yolov5n) | `ArmAI.YOLO` with `:v5` layout | ~1 s/image on FP3 at 640×640 fp32 |
 
 For these, ship them. The hot paths are all on NEON kernels.
 
@@ -19,13 +19,13 @@ For these, ship them. The hot paths are all on NEON kernels.
 
 | Use case | Module | What's missing |
 |---|---|---|
-| Speech-to-text | `NxArm.Models.WhisperCandle` | mel-filter binary distribution + an audio-in integration test |
-| Real-time object detection | `NxArm.Models.YOLO` | Latency improvements (int8 export, smaller input, tracker between frames). See [examples/04 README](../examples/04_yolo_detection/README.md). |
-| Voice activity detection | `NxArm.Models.SileroVAD` | End-to-end test against a real WAV |
-| Text-to-speech | `NxArm.Models.Piper` | Real `phoneme_id_map` parser from the voice's `.onnx.json` |
-| OCR | `NxArm.Models.OCR` | Test against PaddleOCR / Tesseract-class exports |
-| Face detection / landmarks | `NxArm.Models.Face` | Same as OCR |
-| Stable Diffusion | `NxArm.Models.StableDiffusion` | A53/A73 hardware can't run this at usable latency. Demo only. |
+| Speech-to-text | `ArmAI.WhisperCandle` | mel-filter binary distribution + an audio-in integration test |
+| Real-time object detection | `ArmAI.YOLO` | Latency improvements (int8 export, smaller input, tracker between frames). See [examples/04 README](../examples/04_yolo_detection/README.md). |
+| Voice activity detection | `ArmAI.SileroVAD` | End-to-end test against a real WAV |
+| Text-to-speech | `ArmAI.Piper` | Real `phoneme_id_map` parser from the voice's `.onnx.json` |
+| OCR | `ArmAI.OCR` | Test against PaddleOCR / Tesseract-class exports |
+| Face detection / landmarks | `ArmAI.Face` | Same as OCR |
+| Stable Diffusion | `ArmAI.StableDiffusion` | A53/A73 hardware can't run this at usable latency. Demo only. |
 
 ## Where NEON is engaged
 

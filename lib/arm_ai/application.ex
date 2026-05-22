@@ -4,49 +4,31 @@ defmodule ArmAI.Application do
   use Application
   require Logger
 
+  # ArmAI.Application owns ONLY the NIF-runtime side effects:
+  # rayon pool init, dirty-scheduler warm-up, scheduler affinity to
+  # the efficiency cluster, and the optional boot governor.
+  #
+  # First-boot disk resize and model-hub downloads live in the
+  # application layer above us — `nerves_ai` wires those in by
+  # depending on `:fwup_data_resize` and `:model_hub` directly.
+
   @impl true
   def start(_type, _args) do
     case Application.get_env(:nx_arm, :boot_mode, :normal) do
       :recovery ->
-        # Bare boot — skip every side effect so we can ssh in and
-        # bring things up one at a time to find a regression.
-        # Drop a marker so iex can see we booted in recovery mode.
-        Logger.warning("[nx_arm] BOOT_MODE=:recovery — no autostart, no resizer, no model hub, no thread-pool pinning, no governor changes")
+        Logger.warning(
+          "[arm_ai] BOOT_MODE=:recovery — no thread-pool pinning, no governor changes"
+        )
+
         Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
 
       _ ->
-        # Normal path.
-        _ = ArmAI.StorageResizer.run()
-        _ = ensure_models()
         auto_init_thread_pool()
         warm_up_dirty_schedulers()
         pin_normal_schedulers_to_efficiency()
         maybe_apply_boot_governor()
         Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
     end
-  end
-
-  defp ensure_models do
-    case Application.get_env(:nx_arm, :models, []) do
-      [] ->
-        :no_models_configured
-
-      _ ->
-        case ArmAI.Hub.ensure_all() do
-          {:ok, paths} ->
-            Logger.info("[nx_arm] model hub: #{map_size(paths)} model(s) ready")
-            {:ok, paths}
-
-          {:error, errors} ->
-            for {id, reason} <- errors do
-              Logger.warning("[nx_arm] model hub: #{id} failed: #{inspect(reason)}")
-            end
-
-            {:error, errors}
-        end
-    end
-  rescue
-    e -> Logger.warning("[nx_arm] model hub crashed: #{Exception.message(e)}")
   end
 
   # On big.LITTLE chips, the right partition is:

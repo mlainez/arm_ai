@@ -15,10 +15,16 @@ defmodule ArmAI do
 
   ## Shims to companion packages
 
-  * `ArmAI.Hub` → `ModelHub`
   * `ArmAI.Performance` → `CpuGovernor.Performance`
   * `ArmAI.Runtime` → `CpuGovernor.Topology`
-  * `ArmAI.StorageResizer` → `FwupDataResize`
+
+  Things `arm_ai` deliberately does **not** know about:
+
+  * `model_hub` (first-boot HF/URL downloads) — application
+    concern; depend on it from your `:nerves_ai` (or your own
+    application) layer.
+  * `fwup_data_resize` (first-boot F2FS grow) — same: orchestrated
+    by `nerves_ai`, not by the NIF.
 
   ## Backend implementations for the generic libraries
 

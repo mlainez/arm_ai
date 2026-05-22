@@ -17,13 +17,6 @@ defmodule ArmAI.ApplicationTest do
     end
   end
 
-  describe "ensure_models behaviour (private path exercised via Hub)" do
-    test "no models configured is a no-op" do
-      Application.delete_env(:nx_arm, :models)
-      assert {:ok, %{}} == ArmAI.Hub.ensure_all()
-    end
-  end
-
   describe "recovery mode start/2 (idempotent call)" do
     test "calling start/2 when supervisor already runs returns {:error, {:already_started, _}}" do
       # ApplicationTest verifies the contract — start/2 either creates

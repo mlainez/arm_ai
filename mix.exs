@@ -43,12 +43,9 @@ defmodule ArmAI.MixProject do
   defp deps do
     [
       # CPU governor scoping + topology — used by ArmAI.Performance
-      # and ArmAI.Runtime shim modules. Generic Linux helpers.
+      # at inference time, and by ArmAI.Application for scheduler
+      # affinity on big.LITTLE. Generic Linux helper.
       {:cpu_governor, path: "../cpu_governor"},
-      # First-boot model downloader — used by ArmAI.Hub shim.
-      {:model_hub, path: "../model_hub"},
-      # First-boot F2FS resize — used by ArmAI.StorageResizer shim.
-      {:fwup_data_resize, path: "../fwup_data_resize"},
       # HF tokenizers — used by ArmAI.LlamaCandle for string prompts.
       # Itself NIF-wrapped, no Nx dep. Optional from arm_ai's POV;
       # if absent, only the token-id-list prompt API works.

@@ -54,16 +54,4 @@ defmodule ArmAI.WrappersErrorTest do
     end
   end
 
-  describe "ArmAI.Hub (shim → ModelHub)" do
-    test "path/1 returns :not_configured for an unknown id" do
-      assert {:error, :not_configured} = ArmAI.Hub.path(:__no_such_model)
-    end
-  end
-
-  describe "ArmAI.StorageResizer (shim → FwupDataResize)" do
-    test "run/0 returns :disabled when no config set" do
-      Application.delete_env(:nx_arm, :storage_resizer)
-      assert :disabled = ArmAI.StorageResizer.run()
-    end
-  end
 end

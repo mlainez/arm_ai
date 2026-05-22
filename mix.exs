@@ -53,6 +53,10 @@ defmodule ArmAI.MixProject do
       # Itself NIF-wrapped, no Nx dep. Optional from arm_ai's POV;
       # if absent, only the token-id-list prompt API works.
       {:tokenizers, "~> 0.5", optional: true},
+      # Optional Nx for the *Backend modules. When the host app pulls
+      # nx_primitives, llm, vision, or audio (which require Nx), this
+      # gets satisfied; arm_ai itself doesn't need it.
+      {:nx, "~> 0.9", optional: true},
       {:rustler, "~> 0.36", optional: true},
       {:rustler_precompiled, "~> 0.8"}
     ]

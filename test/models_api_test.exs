@@ -4,7 +4,7 @@ defmodule ArmAI.ModelsApiTest do
   # arm_ai ships exactly one model wrapper at the Nx-free layer:
   # ArmAI.LlamaCandle. Every other model bridge (Whisper, ONNX,
   # YOLO, etc.) lives in a domain-specific Nx-tensor sibling
-  # package (arm_llm, arm_vision, arm_audio) and is tested there.
+  # package (llm, vision, audio) and is tested there.
   #
   # These contract tests confirm the LlamaCandle Elixir surface
   # never raises on the unhappy path — missing file, bad tokenizer

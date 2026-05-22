@@ -20,15 +20,26 @@ defmodule ArmAI do
   * `ArmAI.Runtime` → `CpuGovernor.Topology`
   * `ArmAI.StorageResizer` → `FwupDataResize`
 
-  ## Companion packages
+  ## Backend implementations for the generic libraries
 
-  Higher-level Nx-tensor APIs live in sibling packages:
+  Higher-level Nx-tensor APIs live in sibling packages with
+  pluggable backends. `arm_ai` provides the ARM-NEON impl of each:
 
-  * `nx_arm` — `Nx.Backend` impl over `ArmAI.Native`
-  * `arm_nx_primitives` — FFT, embeddings, quantized matmul + conv
-  * `arm_llm` — LLM + STT Nx wrappers (Llama, Whisper)
-  * `arm_vision` — YOLO, OCR, Face, ONNX, vision preprocessing
-  * `arm_audio` — Silero VAD, Piper, audio decode/resample
+  | Generic library     | Behaviour              | ARM impl in `arm_ai`        |
+  |---|---|---|
+  | `nx_arm`            | `Nx.Backend`           | `NxArm.Backend`             |
+  | `nx_primitives`     | `NxPrimitives.Backend` | `ArmAI.NxPrimitivesBackend` |
+  | `infer_llm`         | `InferLLM.Backend`          | `ArmAI.LLMBackend`          |
+  | `infer_vision`      | `InferVision.Backend`       | `ArmAI.VisionBackend`       |
+  | `infer_audio`       | `InferAudio.Backend`        | `ArmAI.AudioBackend`        |
+
+  Activate the ARM impls in your app config (the `nerves_ai`
+  meta-package does this automatically at boot):
+
+      config :nx_primitives, backend: ArmAI.NxPrimitivesBackend
+      config :infer_llm,           backend: ArmAI.LLMBackend
+      config :infer_vision,        backend: ArmAI.VisionBackend
+      config :infer_audio,         backend: ArmAI.AudioBackend
 
   `arm_ai` itself has no `Nx` dependency. Depend on it directly
   for embedded inference apps that don't need the Nx ecosystem.

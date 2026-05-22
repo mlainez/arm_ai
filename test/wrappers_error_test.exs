@@ -4,7 +4,7 @@ defmodule ArmAI.WrappersErrorTest do
   # Contract tests for arm_ai's shim modules — they must never
   # raise on unhappy paths. The Audio / Safetensors / Tokenizers
   # tests that used to live here moved to:
-  #   - ArmAudio.* (in the arm_audio package)
+  #   - Audio.* (in the audio package)
   #   - safetensors + tokenizers contracts (upstream Hex packages)
 
   describe "ArmAI.Performance (shim → CpuGovernor.Performance)" do

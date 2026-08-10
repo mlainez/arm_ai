@@ -36,7 +36,7 @@ defmodule ArmAI.MixProject do
       files: ~w(lib native/arm_ai_nif/src native/arm_ai_nif/Cargo.toml
                 native/arm_ai_nif/Cargo.lock README.md mix.exs
                 checksum-Elixir.ArmAI.Native.exs),
-      links: %{"GitHub" => "https://github.com/marclainez/arm_ai"}
+      links: %{"GitHub" => "https://github.com/mlainez/arm_ai"}
     ]
   end
 

@@ -70,7 +70,7 @@ defmodule ArmAI.Native do
   use RustlerPrecompiled,
     otp_app: :arm_ai,
     crate: "arm_ai_nif",
-    base_url: "https://github.com/marclainez/arm_ai/releases/download/v#{version}",
+    base_url: "https://github.com/mlainez/arm_ai/releases/download/v#{version}",
     version: version,
     nif_versions: ["2.16", "2.17"],
     targets: [

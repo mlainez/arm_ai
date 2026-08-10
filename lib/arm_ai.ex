@@ -20,10 +20,10 @@ defmodule ArmAI do
 
   Things `arm_ai` deliberately does **not** know about:
 
-  * `model_hub` (first-boot HF/URL downloads) — application
+  * `nerves_model_hub` (first-boot HF/URL downloads) — application
     concern; depend on it from your `:nerves_ai` (or your own
     application) layer.
-  * `fwup_data_resize` (first-boot F2FS grow) — same: orchestrated
+  * `nerves_data_resize` (first-boot F2FS grow) — same: orchestrated
     by `nerves_ai`, not by the NIF.
 
   ## Backend implementations for the generic libraries

@@ -10,7 +10,7 @@ defmodule ArmAI.Application do
   #
   # First-boot disk resize and model-hub downloads live in the
   # application layer above us — `nerves_ai` wires those in by
-  # depending on `:fwup_data_resize` and `:model_hub` directly.
+  # depending on `:nerves_data_resize` and `:nerves_model_hub` directly.
 
   @impl true
   def start(_type, _args) do

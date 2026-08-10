@@ -45,7 +45,7 @@ defmodule ArmAI.MixProject do
       # CPU governor scoping + topology — used by ArmAI.Performance
       # at inference time, and by ArmAI.Application for scheduler
       # affinity on big.LITTLE. Generic Linux helper.
-      {:cpu_governor, path: "../cpu_governor"},
+      {:cpu_governor, github: "mlainez/cpu_governor"},
       # HF tokenizers — used by ArmAI.LlamaCandle for string prompts.
       # Itself NIF-wrapped, no Nx dep. Optional from arm_ai's POV;
       # if absent, only the token-id-list prompt API works.

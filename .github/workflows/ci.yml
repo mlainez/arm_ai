@@ -70,5 +70,5 @@ jobs:
         run: cargo install cross --locked
 
       - name: Cross-compile NIF
-        working-directory: native/nx_arm_nif
+        working-directory: native/arm_ai_nif
         run: cross build --release --target ${{ matrix.target }}

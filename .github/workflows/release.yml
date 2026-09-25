@@ -46,7 +46,7 @@ jobs:
         run: |
           PROJECT_VERSION="${GITHUB_REF_NAME#v}"
           echo "project-version=$PROJECT_VERSION" >> $GITHUB_OUTPUT
-          echo "project-name=nx_arm_nif" >> $GITHUB_OUTPUT
+          echo "project-name=arm_ai_nif" >> $GITHUB_OUTPUT
 
       - name: Build precompiled NIF
         uses: philss/rustler-precompiled-action@v1.1.4
@@ -56,13 +56,13 @@ jobs:
           target: ${{ matrix.job.target }}
           nif-version: ${{ matrix.nif_version }}
           use-cross: ${{ matrix.job.use-cross }}
-          project-dir: native/nx_arm_nif
+          project-dir: native/arm_ai_nif
 
       - name: Artifact upload
         uses: actions/upload-artifact@v4
         with:
           name: "${{ matrix.job.target }}-${{ matrix.nif_version }}"
-          path: native/nx_arm_nif/*.tar.gz
+          path: native/arm_ai_nif/*.tar.gz
 
   release:
     needs: build_nif

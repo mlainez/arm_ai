@@ -1,83 +1,84 @@
 defmodule ArmAI.LlamaCandle do
   @moduledoc """
-  Llama-family inference via the upstream `candle` crate.
+  Quantized Llama-architecture inference via the upstream `candle` crate.
 
-  Per the "use the crate if it's faster" policy: candle's Q4_0 /
-  Q4_K / Q8_0 matmul kernels are NEON-tuned across more ARM cores
-  than we have, its Llama implementation is widely-used + tested,
-  and its KV cache is in-place (no per-step BEAM↔NIF round-trips).
+  Loads GGUF files whose metadata uses the `llama.*` keys (Llama,
+  TinyLlama, SmolLM, Mistral-style exports). Other architectures
+  (Phi, Qwen, Gemma) are not supported by candle's quantized Llama
+  loader. Decoding is greedy.
 
-  This module is the recommended path for running Llama / TinyLlama /
-  SmolLM / Phi / Mistral / Qwen on Nerves. Keep `ArmAI.Llama`
-  around for users who want the pure-Nx integration path.
-
-      {:ok, model} = ArmAI.LlamaCandle.load("/root/tinyllama.gguf")
-      {tokens, stats} = ArmAI.LlamaCandle.generate(model,
-        prompt_tokens: [1, 1724, 338, 263],
-        max_new: 32
+      {:ok, model} = ArmAI.LlamaCandle.load("/data/models/tinyllama.gguf",
+                       tokenizer: "/data/models/tinyllama-tokenizer.json")
+      {reply, stats} = ArmAI.LlamaCandle.generate(model,
+        prompt: "<|user|>\\nWhat is Elixir?</s>\\n<|assistant|>\\n",
+        max_new: 64,
+        stop_tokens: [2]
       )
+
+  Requires the `llm` Cargo feature (on by default).
   """
 
   defstruct [:handle, :tokenizer]
 
+  @type t :: %__MODULE__{handle: reference(), tokenizer: Tokenizers.Tokenizer.t() | nil}
+
   @doc """
-  Load a GGUF Llama-family model via candle. Optionally also load a
-  `tokenizer.json` so `generate/2` can take string prompts.
+  Load a GGUF model. Pass `tokenizer:` (a `tokenizer.json` path) to let
+  `generate/2` take and return strings.
 
-      {:ok, model} = ArmAI.LlamaCandle.load("/root/tinyllama.gguf",
-                       tokenizer: "/root/tinyllama-tokenizer.json")
-
-  Requires the `llm` Cargo feature (default-on). If the binary was
-  built with `features: []` you'll get `{:error, :llm_feature_disabled}`.
+  Returns `{:error, reason}` if the model or the tokenizer can't be loaded.
   """
-  @spec load(Path.t(), keyword()) :: {:ok, %__MODULE__{}} | {:error, term()}
+  @spec load(Path.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def load(path, opts \\ []) do
-    if not function_exported?(ArmAI.Native, :llama_candle_load_op, 1) do
-      {:error, :llm_feature_disabled}
-    else
-    try do
-      case ArmAI.Native.llama_candle_load_op(path) do
-        {:error, reason} ->
-          {:error, reason}
-
-        handle ->
-          tokenizer =
-            case Keyword.get(opts, :tokenizer) do
-              nil ->
-                nil
-
-              tok_path ->
-                case Tokenizers.Tokenizer.from_file(tok_path) do
-                  {:ok, tok} -> tok
-                  {:error, _} -> nil
-                end
-            end
-
-          {:ok, %__MODULE__{handle: handle, tokenizer: tokenizer}}
-      end
-    rescue
-      e -> {:error, e}
-    end
+    with {:ok, tokenizer} <- load_tokenizer(Keyword.get(opts, :tokenizer)),
+         {:ok, handle} <- load_model(path) do
+      {:ok, %__MODULE__{handle: handle, tokenizer: tokenizer}}
     end
   end
 
-  @doc """
-  Greedy-decode `max_new` tokens after `prompt_tokens`. Returns
-  `{all_tokens, stats}` where `all_tokens` is `prompt ++ generated`
-  and `stats` carries timing (matches `ArmAI.Llama.generate`).
+  defp load_tokenizer(nil), do: {:ok, nil}
 
-  Wraps the call in `ArmAI.Performance.with_performance/1` so the
-  CPU governor flips to `performance` for the burst and restores
-  on exit (default; pass `performance_governor: false` to disable).
+  defp load_tokenizer(path) do
+    case Tokenizers.Tokenizer.from_file(path) do
+      {:ok, tok} -> {:ok, tok}
+      {:error, reason} -> {:error, {:tokenizer, reason}}
+    end
+  end
+
+  defp load_model(path) do
+    if File.regular?(path) do
+      {:ok, ArmAI.Native.llama_candle_load_op(path)}
+    else
+      {:error, {:enoent, path}}
+    end
+  rescue
+    e in ErlangError -> {:error, e.original}
+    e -> {:error, e}
+  end
+
+  @doc """
+  Greedy-decode up to `max_new` tokens.
+
+  ## Options
+
+    * `:prompt` — a string (requires `tokenizer:` at load time), or
+    * `:prompt_tokens` — a list of token ids.
+    * `:max_new` — maximum number of generated tokens. Default 16.
+    * `:stop_tokens` — token ids that end generation (e.g. the model's
+      EOS id). The stop token is not included in the result. Default `[]`.
+    * `:performance_governor` — scope the `performance` CPU governor
+      to the call via `CpuGovernor.Performance`. Default `true`.
+
+  Returns `{generated, stats}`. `generated` holds only the new tokens:
+  a string when `:prompt` was given, a list of ids otherwise.
   """
-  @spec generate(%__MODULE__{}, keyword()) :: {[non_neg_integer()] | String.t(), map()}
-  def generate(%__MODULE__{handle: handle, tokenizer: tokenizer} = model, opts) do
+  @spec generate(t(), keyword()) :: {[non_neg_integer()] | String.t(), map()}
+  def generate(%__MODULE__{handle: handle, tokenizer: tokenizer}, opts) do
     {prompt, return_string?} =
       cond do
         text = Keyword.get(opts, :prompt) ->
           if tokenizer == nil do
-            raise ArgumentError,
-                  "load/2 with `tokenizer:` path to use string :prompt — got plain text but no tokenizer"
+            raise ArgumentError, "a string :prompt requires load/2 with a `tokenizer:` path"
           end
 
           {:ok, encoding} = Tokenizers.Tokenizer.encode(tokenizer, text)
@@ -90,15 +91,19 @@ defmodule ArmAI.LlamaCandle do
           raise ArgumentError, "pass :prompt (string) or :prompt_tokens (list)"
       end
 
-    _ = model
     max_new = Keyword.get(opts, :max_new, 16)
-    scope_governor? = Keyword.get(opts, :performance_governor, true)
+    stop_tokens = Keyword.get(opts, :stop_tokens, [])
 
     do_run = fn ->
       {tokens, prefill_us, decode_us} =
-        ArmAI.Native.llama_candle_generate_op(handle, prompt, max_new)
+        ArmAI.Native.llama_candle_generate_op(handle, prompt, max_new, stop_tokens)
 
-      all = prompt ++ tokens
+      tokens =
+        case List.last(tokens) do
+          nil -> tokens
+          last -> if last in stop_tokens, do: List.delete_at(tokens, -1), else: tokens
+        end
+
       n_new = length(tokens)
 
       stats = %{
@@ -106,25 +111,24 @@ defmodule ArmAI.LlamaCandle do
         n_new: n_new,
         prefill_ms: prefill_us / 1000.0,
         decode_total_ms: decode_us / 1000.0,
-        decode_ms_per_tok:
-          if(n_new > 1, do: decode_us / 1000.0 / max(n_new - 1, 1), else: nil),
+        decode_ms_per_tok: if(n_new > 1, do: decode_us / 1000.0 / (n_new - 1), else: nil),
         prefill_tokens_per_sec: length(prompt) * 1.0e6 / max(prefill_us, 1),
-        cpu_temp_c: ArmAI.Performance.max_cpu_temp_c()
+        cpu_temp_c: CpuGovernor.Performance.max_cpu_temp_c()
       }
 
       result =
         if return_string? do
-          {:ok, text} = Tokenizers.Tokenizer.decode(tokenizer, all)
+          {:ok, text} = Tokenizers.Tokenizer.decode(tokenizer, tokens)
           text
         else
-          all
+          tokens
         end
 
       {result, stats}
     end
 
-    if scope_governor? do
-      ArmAI.Performance.with_performance(do_run)
+    if Keyword.get(opts, :performance_governor, true) do
+      CpuGovernor.Performance.with_performance(do_run)
     else
       do_run.()
     end

@@ -2,7 +2,7 @@ defmodule ArmAI.LlamaCandleTest do
   @moduledoc """
   Surface-area tests for `ArmAI.LlamaCandle`. The real inference
   paths need a GGUF model file + a target ARM device — those are
-  driven by the examples in `examples/01_chatbot/` from an actual
+  driven by the examples in `examples/chatbot/` from an actual
   device. Here we lock down the Elixir contract:
 
   * `load/2` surfaces errors cleanly (missing file, missing
@@ -17,7 +17,7 @@ defmodule ArmAI.LlamaCandleTest do
       assert {:error, _} = ArmAI.LlamaCandle.load("/tmp/__nope.gguf")
     end
 
-    test "missing tokenizer file is logged but the load still surfaces the GGUF error" do
+    test "missing tokenizer file returns {:error, _}" do
       assert {:error, _} =
                ArmAI.LlamaCandle.load("/tmp/__nope.gguf",
                  tokenizer: "/tmp/__nope_tokenizer.json"

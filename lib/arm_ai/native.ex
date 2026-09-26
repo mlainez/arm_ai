@@ -1,9 +1,9 @@
 defmodule ArmAI.Native do
   @moduledoc false
 
-  # Derive Rust target triple from Nerves environment variables.
-  # Mirrors the original NxCL.Native cross-compile logic so the NIF
-  # builds cleanly under Nerves cross-toolchains.
+  # Derive the Rust target triple from the Nerves environment
+  # (TARGET_ARCH / TARGET_OS / TARGET_ABI) so the NIF cross-compiles
+  # under Nerves toolchains. RUSTLER_TARGET overrides it.
   @rust_target (cond do
                   target = System.get_env("RUSTLER_TARGET") ->
                     target
@@ -37,32 +37,33 @@ defmodule ArmAI.Native do
 
   # Production loader: pull a precompiled NIF binary from the release
   # tarball matched to the runtime triple. Falls back to a local
-  # rustc build when (a) `NX_ARM_BUILD=1` is set, (b) the runtime
+  # rustc build when (a) `ARM_AI_BUILD=1` is set, (b) the runtime
   # triple isn't in the published target list, or (c) the tarball
   # checksum file isn't present (i.e. building from a git checkout).
+  # No release has been published yet, so today it always builds.
   #
   # The `:targets` list is the supported deployment matrix; every
   # entry has a corresponding job in .github/workflows/release.yml.
   version = Mix.Project.config()[:version]
 
   force_build? =
-    System.get_env("NX_ARM_BUILD") in ["1", "true"] or
+    System.get_env("ARM_AI_BUILD") in ["1", "true"] or
       not File.exists?(Path.join([__DIR__, "..", "..", "checksum-Elixir.ArmAI.Native.exs"]))
 
   # Cargo features. The crate's `default` is `full` (every
   # capability). Override per-application to shrink the binary:
   #
-  #     config :nx_arm, features: ["chatbot"]           # 10 MB
-  #     config :nx_arm, features: ["whisper"]           # 13 MB
-  #     config :nx_arm, features: ["yolo"]              # 26 MB
-  #     config :nx_arm, features: ["onnx", "vision"]    # compose your own
-  #     config :nx_arm, features: []                    # 2.3 MB core only
+  #     config :arm_ai, features: ["chatbot"]           # 10 MB
+  #     config :arm_ai, features: ["whisper"]           # 13 MB
+  #     config :arm_ai, features: ["yolo"]              # 26 MB
+  #     config :arm_ai, features: ["onnx", "vision"]    # compose your own
+  #     config :arm_ai, features: []                    # 2.3 MB core only
   #
   # See docs/size_profile.md for the full matrix + presets.
   # Honoured by the local-build path; precompiled releases on
   # GitHub always ship the `full` set.
   cargo_features =
-    case Application.compile_env(:nx_arm, :features, :default) do
+    case Application.compile_env(:arm_ai, :features, :default) do
       :default -> nil
       list when is_list(list) -> list |> Enum.map(&to_string/1)
     end
@@ -80,7 +81,6 @@ defmodule ArmAI.Native do
       "armv7-unknown-linux-musleabihf",
       "x86_64-unknown-linux-gnu",
       "x86_64-unknown-linux-musl",
-      "x86_64-apple-darwin",
       "aarch64-apple-darwin"
     ],
     force_build: force_build?,
@@ -449,22 +449,13 @@ defmodule ArmAI.Native do
   Greedy decode via `candle`. Returns `{generated_token_ids,
   prefill_us, decode_us}`.
   """
-  @spec llama_candle_generate_op(reference(), [non_neg_integer()], non_neg_integer()) ::
-          {[non_neg_integer()], non_neg_integer(), non_neg_integer()}
-  def llama_candle_generate_op(_model, _prompt, _max_new),
-    do: :erlang.nif_error(:nif_not_loaded)
-
-  # --- Tokenizers (HuggingFace `tokenizers` crate) ---
-
-  @spec tokenizer_load_op(String.t()) :: reference()
-  def tokenizer_load_op(_path), do: :erlang.nif_error(:nif_not_loaded)
-
-  @spec tokenizer_encode_op(reference(), String.t(), boolean()) :: [non_neg_integer()]
-  def tokenizer_encode_op(_handle, _text, _add_special),
-    do: :erlang.nif_error(:nif_not_loaded)
-
-  @spec tokenizer_decode_op(reference(), [non_neg_integer()], boolean()) :: String.t()
-  def tokenizer_decode_op(_handle, _ids, _skip_special),
+  @spec llama_candle_generate_op(
+          reference(),
+          [non_neg_integer()],
+          non_neg_integer(),
+          [non_neg_integer()]
+        ) :: {[non_neg_integer()], non_neg_integer(), non_neg_integer()}
+  def llama_candle_generate_op(_model, _prompt, _max_new, _stop_tokens),
     do: :erlang.nif_error(:nif_not_loaded)
 
   # --- Embeddings / RAG primitives ---
@@ -498,11 +489,6 @@ defmodule ArmAI.Native do
 
   @spec rfft_op(binary()) :: binary()
   def rfft_op(_input), do: :erlang.nif_error(:nif_not_loaded)
-
-  # --- SafeTensors ---
-
-  @spec safetensors_load_op(String.t()) :: [{String.t(), [non_neg_integer()], String.t(), binary()}]
-  def safetensors_load_op(_path), do: :erlang.nif_error(:nif_not_loaded)
 
   # --- Whisper (candle-transformers) ---
 

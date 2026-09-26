@@ -8,16 +8,11 @@
 //! The Elixir side calls:
 //!   * `llama_candle_load_op(path)` → opens the GGUF, builds a
 //!     `ResourceArc<LlamaModelResource>` holding the loaded model.
-//!   * `llama_candle_generate_op(model, prompt, max_new)` → greedy
-//!     decode, returns the generated token IDs.
+//!   * `llama_candle_generate_op(model, prompt, max_new, stop_tokens)` →
+//!     greedy decode, returns the generated token IDs and timings.
 //!
-//! Compared to the hand-rolled `ArmAI.Llama`:
-//!   * Q4_0 matmul uses candle's NEON kernel (which has been
-//!     profiled and tuned on a wider set of ARM cores than we have
-//!     access to).
-//!   * KV cache is candle-internal, no per-step put_slice copies.
-//!   * The whole decoder layer runs in one Rust function — saves
-//!     hundreds of BEAM↔NIF round-trips per token.
+//! The KV cache is candle-internal and the whole decode loop runs in
+//! Rust, so there are no per-token BEAM↔NIF round-trips.
 
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
@@ -52,9 +47,10 @@ pub fn load_model(path: &str) -> Result<LlamaResource, String> {
     })
 }
 
-/// One forward step: takes `prompt` token IDs, runs the model up to
-/// `max_new` greedy decode steps. Returns the new tokens (only the
-/// generated ones, not the prompt).
+/// Greedy decode: takes `prompt` token IDs and runs up to `max_new`
+/// decode steps, stopping early after emitting any token in
+/// `stop_tokens` (the stop token is included in the output). Returns
+/// only the generated tokens, not the prompt.
 ///
 /// Timing instrumentation: the caller receives prefill + decode
 /// timings via the return tuple so the Elixir side can report
@@ -63,7 +59,12 @@ pub fn generate_greedy(
     res: &LlamaResource,
     prompt: &[u32],
     max_new: usize,
+    stop_tokens: &[u32],
 ) -> Result<GenerateResult, String> {
+    if max_new == 0 || prompt.is_empty() {
+        return Ok(GenerateResult { tokens: Vec::new(), prefill_us: 0, decode_us: 0 });
+    }
+
     let mut model = res.model.lock().map_err(|e| format!("lock: {}", e))?;
     let device = Device::Cpu;
 
@@ -93,6 +94,9 @@ pub fn generate_greedy(
 
     let mut offset = prompt.len();
     for _ in 1..max_new {
+        if stop_tokens.contains(&next) {
+            break;
+        }
         let step_tensor = Tensor::new(&[next], &device)
             .map_err(|e| format!("Tensor::new step: {}", e))?
             .unsqueeze(0)

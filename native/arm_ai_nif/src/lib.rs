@@ -1,9 +1,10 @@
-// nx_arm — Nx backend for ARM CPUs via NEON intrinsics + rayon.
+// arm_ai_nif — edge AI inference NIF for ARM CPUs.
 //
-// Pure-CPU compute: no OpenCL, no GPU, no device context. Every NIF
-// takes raw `Binary` bytes in, returns raw `Binary` bytes out. The
-// Elixir backend (NxArm.Backend) stores tensors as plain binaries
-// and dispatches each Nx callback to one of these.
+// Pure-CPU compute via NEON intrinsics + rayon. The kernel NIFs take raw
+// `Binary` bytes in and return raw `Binary` bytes out; `NxArm.Backend`
+// (in the nx_arm package) stores tensors as plain binaries and dispatches
+// Nx callbacks to them. The model bridges (candle Llama/Whisper, tract
+// ONNX, audio, image) are gated behind Cargo features.
 
 // mimalloc was tried here as a global allocator; on FP3 it boot-
 // looped (likely TLS init order vs the BEAM scheduler). Reverting
@@ -19,15 +20,6 @@ mod vision;
 #[cfg(feature = "llm")]
 mod llama_candle;
 
-// quantized_llama_inplace.rs is an unused experimental variant that
-// vendored candle's quantized Llama with an in-place KvCache (replacing
-// the upstream `Tensor::cat` calls). Measured on FP3 / Snapdragon 632:
-// the narrow-view tensors returned by `KvCache::current_data()` aren't
-// contiguous, so the downstream `q.matmul(k.t())` and `repeat_kv` paths
-// trigger implicit `.contiguous()` materialisations that outweigh the
-// saved cat allocations. Net: 4.72 tok/s upstream → 4.55 tok/s with
-// the in-place cache. File kept in-tree as a record of the experiment;
-// not compiled into the .so.
 #[cfg(feature = "onnx")]
 mod onnx;
 mod ops;
@@ -1678,16 +1670,12 @@ fn llama_candle_generate_op(
     model: ResourceArc<llama_candle::LlamaResource>,
     prompt: Vec<u32>,
     max_new: usize,
+    stop_tokens: Vec<u32>,
 ) -> NifResult<(Vec<u32>, u64, u64)> {
-    let result = llama_candle::generate_greedy(&model, &prompt, max_new)
+    let result = llama_candle::generate_greedy(&model, &prompt, max_new, &stop_tokens)
         .map_err(|e| rustler::Error::Term(Box::new(format!("candle generate: {}", e))))?;
     Ok((result.tokens, result.prefill_us, result.decode_us))
 }
-
-// Tokenizer bridge was removed: nx_arm now depends on the upstream
-// `:tokenizers` Hex package (elixir-nx/tokenizers), which wraps the
-// same Rust crate via its own precompiled NIF. Saves us a duplicate
-// build path and keeps tokenization out of the Nx-backend scope.
 
 // ---------------------------------------------------------------
 // ONNX bridge (tract-onnx).
@@ -1987,10 +1975,6 @@ fn rfft_op<'a>(env: Env<'a>, input: rustler::Binary<'a>) -> NifResult<rustler::B
     f32_vec_to_bin(env, &out)
 }
 
-// SafeTensors loader was removed: nx_arm now depends on the upstream
-// `:safetensors` Hex package (elixir-nx/safetensors). Same format,
-// maintained by the Nx core team, no need to duplicate the loader.
-
 // ---------------------------------------------------------------
 // Whisper bridge (candle-transformers).
 // ---------------------------------------------------------------
@@ -2046,14 +2030,5 @@ fn load(env: Env, _info: rustler::Term) -> bool {
     }
     true
 }
-
-// PGO note: an earlier iteration tried to expose
-// __llvm_profile_write_file via a `#[rustler::nif] fn pgo_flush_op`
-// gated by the `pgo` feature. That broke NIF on_load (symbol couldn't
-// resolve at .so load time even with the profile runtime linked).
-// The atexit handler installed by `-Cprofile-generate` is sufficient
-// on Nerves — BEAM's signal-driven shutdown via erlinit DOES write
-// the .profraw before the process is reaped. Profile data was
-// captured successfully without any custom flush NIF.
 
 rustler::init!("Elixir.ArmAI.Native", load = load);

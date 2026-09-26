@@ -19,26 +19,25 @@ jobs:
         nif_version: ["2.16", "2.17"]
         job:
           # Linux glibc
-          - { target: aarch64-unknown-linux-gnu,        os: ubuntu-22.04, use-cross: true }
-          - { target: armv7-unknown-linux-gnueabihf,    os: ubuntu-22.04, use-cross: true }
-          - { target: x86_64-unknown-linux-gnu,         os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu,        os: ubuntu-24.04, use-cross: true }
+          - { target: armv7-unknown-linux-gnueabihf,    os: ubuntu-24.04, use-cross: true }
+          - { target: x86_64-unknown-linux-gnu,         os: ubuntu-24.04 }
 
           # Linux musl (Nerves uses musl on some boards)
-          - { target: aarch64-unknown-linux-musl,       os: ubuntu-22.04, use-cross: true }
-          - { target: armv7-unknown-linux-musleabihf,   os: ubuntu-22.04, use-cross: true }
-          - { target: x86_64-unknown-linux-musl,        os: ubuntu-22.04, use-cross: true }
+          - { target: aarch64-unknown-linux-musl,       os: ubuntu-24.04, use-cross: true }
+          - { target: armv7-unknown-linux-musleabihf,   os: ubuntu-24.04, use-cross: true }
+          - { target: x86_64-unknown-linux-musl,        os: ubuntu-24.04, use-cross: true }
 
           # macOS (dev box convenience)
-          - { target: x86_64-apple-darwin,              os: macos-13 }
           - { target: aarch64-apple-darwin,             os: macos-14 }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: "26"
-          elixir-version: "1.18"
+          otp-version: "29.1.1"
+          elixir-version: "1.20.4"
 
       - name: Extract project metadata
         id: meta

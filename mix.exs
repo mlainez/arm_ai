@@ -7,19 +7,19 @@ defmodule ArmAI.MixProject do
     [
       app: :arm_ai,
       version: @version,
-      elixir: "~> 1.15",
+      elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       name: "ArmAI",
       description:
-        "Edge AI inference NIF for ARM CPUs — Llama / Whisper / ONNX via Candle + tract-onnx, with hand-tuned NEON kernels",
-      docs: [main: "readme", extras: ["README.md"]],
+        "Edge AI inference NIF for ARM CPUs — quantized Llama and Whisper via candle, ONNX via tract, with hand-tuned NEON kernels",
+      docs: [main: "readme", extras: ["README.md", "CHANGELOG.md", "docs/perf_llm.md"]],
       package: package()
     ]
   end
 
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(:test), do: ["lib"]
   defp elixirc_paths(_), do: ["lib"]
 
   def application do
@@ -47,14 +47,14 @@ defmodule ArmAI.MixProject do
       # affinity on big.LITTLE. Generic Linux helper.
       {:cpu_governor, github: "mlainez/cpu_governor"},
       # HF tokenizers — used by ArmAI.LlamaCandle for string prompts.
-      # Itself NIF-wrapped, no Nx dep. Optional from arm_ai's POV;
-      # if absent, only the token-id-list prompt API works.
-      {:tokenizers, "~> 0.5", optional: true},
+      {:tokenizers, "~> 0.5"},
       # Optional Nx for the *Backend modules. When the host app pulls
       # nx_primitives, llm, vision, or audio (which require Nx), this
       # gets satisfied; arm_ai itself doesn't need it.
-      {:nx, "~> 0.9", optional: true},
-      {:rustler, "~> 0.36", optional: true},
+      {:nx, "~> 0.12.0", optional: true},
+      # No precompiled release is published yet, so the NIF is always
+      # built from source and rustler is a hard requirement.
+      {:rustler, "~> 0.37"},
       {:rustler_precompiled, "~> 0.8"}
     ]
   end

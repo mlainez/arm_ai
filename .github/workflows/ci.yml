@@ -17,22 +17,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Matches the official Nerves systems (nerves_system_br 1.35).
         include:
-          - os: ubuntu-22.04
-            otp: "26"
-            elixir: "1.18"
-          - os: ubuntu-22.04
-            otp: "27"
-            elixir: "1.18"
+          - os: ubuntu-24.04
+            otp: "29.1.1"
+            elixir: "1.20.4"
           - os: macos-14
-            otp: "26"
-            elixir: "1.18"
+            otp: "29.1.1"
+            elixir: "1.20.4"
 
     env:
-      NX_ARM_BUILD: "1"
+      ARM_AI_BUILD: "1"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: erlef/setup-beam@v1
         with:
@@ -49,7 +47,7 @@ jobs:
 
   cross_build:
     name: "cross-build ${{ matrix.target }}"
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     strategy:
       fail-fast: false
@@ -61,7 +59,7 @@ jobs:
           - armv7-unknown-linux-musleabihf
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

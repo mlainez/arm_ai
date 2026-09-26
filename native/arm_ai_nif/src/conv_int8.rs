@@ -1,7 +1,7 @@
 //! CPU 2-D convolution with int8-quantised weights and f32 activations.
 //!
-//! Layout (matches what `SmolLLM.Quantize.write!` produces, extended to
-//! 4-D conv kernels):
+//! Layout (per-output-channel int8 quantization, as used by
+//! `NxPrimitives.QuantizedConv`):
 //!
 //! * `input`   : `[N, H, W, Cin]` f32, channels-last (NHWC).
 //! * `weight`  : `[Cout, Kh*Kw*Cin]` int8, row-major. Each output channel
@@ -15,11 +15,8 @@
 //! `H_out = (H + pad_top + pad_bottom - Kh) / stride_h + 1`
 //! and the analogous formula for `W_out`.
 //!
-//! First version: scalar Rust, no NEON intrinsics. Used to nail down
-//! correctness and the wire format before reaching for SIMD. The hot
-//! ci-loop is the obvious vectorisation target — once correctness is
-//! validated against `Nx.conv` on host and on-device, swap the inner
-//! loop for `core::arch::aarch64` int8x8 widening + f32 FMA.
+//! The inner channel dot product has a NEON path on aarch64 and a scalar
+//! fallback elsewhere. `nx_primitives` tests the result against `Nx.conv`.
 
 use crate::shape_ops;
 
@@ -232,9 +229,7 @@ pub fn conv2d_int8(
 }
 
 /// Pure-f32 conv2d. Same NHWC + flat-weight layout as `conv2d_int8`
-/// but with f32 weights and no per-channel scale. Used by the generic
-/// `NxCL.Backend.conv` dispatch when the kernel is a normal `Nx.Tensor`
-/// rather than a pre-quantised `NxCL.QuantizedConv`.
+/// but with f32 weights and no per-channel scale.
 #[allow(clippy::too_many_arguments)]
 pub fn conv2d_f32(
     input_f32: &[f32],

@@ -35,6 +35,8 @@
   feed the integer inputs these models need.
 * The `quantized_matmul` / `quantized_conv2d` backend callbacks, which
   only raised.
+* The musl targets from CI, the release matrix and the precompiled target
+  list. Nerves toolchains are glibc, and the musl builds didn't compile.
 * Elixir stubs with no NIF behind them (`tokenizer_*`,
   `safetensors_load_op`), and the uncompiled
   `quantized_llama_inplace.rs` experiment.

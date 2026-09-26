@@ -95,22 +95,8 @@ unsafe fn vtanhq_f32(x: core::arch::aarch64::float32x4_t) -> core::arch::aarch64
 // Fast CPU shape ops on raw bytes — broadcast, transpose, concatenate,
 // batched matmul, plus f32 elementwise binary/unary.
 //
-// Why these are CPU and not GPU: a5xx Rusticl runs the elementwise GPU
-// kernel at ~2 MFLOPS (dispatch overhead + single-thread-per-cell
-// pattern + non-tiled memory access). Cortex-A73 NEON via the auto-
-// vectoriser is ~50× faster for the same compute. The GPU↔CPU
-// roundtrip is cheap (sub-ms for the tensor sizes ViT-tiny uses).
-//
-// These exist so NxCL.Backend can keep tensors resident on the GPU but
-// still avoid the pure-Elixir BinaryBackend fallback path for shape
-// manipulations that Rusticl/a5xx can't (yet) do natively. The flow is:
-//
-//   1. backend.ex reads input bytes from the GPU
-//   2. calls one of these NIFs
-//   3. writes the output bytes back to the GPU
-//
-// Rust + rayon doing the actual work is 10–100× faster than pure-Elixir
-// Nx.BinaryBackend, so even with the roundtrip we come out well ahead.
+// `NxArm.Backend` dispatches to these instead of falling back to the
+// pure-Elixir Nx.BinaryBackend; Rust + rayon is 10–100× faster.
 
 use rayon::prelude::*;
 
@@ -724,6 +710,15 @@ pub fn bias_add_activation_f32_into(
         ));
     }
 
+    // Validate here: the match below runs inside rayon workers, and a
+    // panic there aborts the whole BEAM (panic = "abort").
+    if !matches!(activation, "none" | "relu" | "relu6" | "sigmoid" | "tanh" | "gelu") {
+        return Err(format!("bias_add_act: unknown activation {:?}", activation));
+    }
+    if outer * inner == 0 {
+        return Ok(());
+    }
+
     let chunk_rows = ((outer + 7) / 8).max(8).min(outer.max(1));
 
     use rayon::prelude::*;
@@ -778,9 +773,7 @@ pub fn bias_add_activation_f32_into(
                         }
                     }
                     other => {
-                        // We've already validated upstream; this branch is
-                        // unreachable when callers use the documented set.
-                        panic!("unknown activation: {}", other);
+                        unreachable!("activation validated above: {}", other);
                     }
                 }
             }
@@ -812,6 +805,9 @@ pub fn bias_add_f32_into(
             out.len(),
             outer * inner
         ));
+    }
+    if outer * inner == 0 {
+        return Ok(());
     }
 
     // Each row is independent and small enough to keep `bias` in L1.
@@ -2209,7 +2205,9 @@ pub fn elementwise_binary_f32_into(op: &str, a: &[f32], b: &[f32], out: &mut [f3
         "min" => neon_op!(vminq_f32, |x: f32, y: f32| x.min(y)),
         "pow" => scalar_op!(|x: f32, y: f32| x.powf(y)),
         "atan2" => scalar_op!(|x: f32, y: f32| x.atan2(y)),
-        "remainder" => scalar_op!(|x: f32, y: f32| x.rem_euclid(y)),
+        // Truncated remainder (sign follows the dividend), matching
+        // Nx.remainder / :math.fmod.
+        "remainder" => scalar_op!(|x: f32, y: f32| x % y),
         other => return Err(format!("unknown binary op: {}", other)),
     }
 

@@ -1,12 +1,11 @@
 //! Whisper speech-to-text via candle-transformers.
 //!
-//! Loads either the safetensors or GGUF quantised Whisper from
-//! HuggingFace (whisper-tiny.en is the canonical Nerves-sized
-//! model) and runs an audio buffer through encode → decode →
-//! detokenize.
+//! Loads a safetensors or candle-quantized GGUF Whisper checkpoint
+//! (whisper-tiny.en is the Nerves-sized choice) and runs 16 kHz mono
+//! f32 audio through mel → encode → greedy decode → detokenize, one
+//! 30 s window at a time.
 //!
-//! Pairs with `ArmAI.Audio.load_for_whisper/1` which produces the
-//! 16 kHz mono f32 input.
+//! `InferAudio.Decoder.load_for_whisper/1` produces the input.
 
 use candle_core::{Device, IndexOp, Tensor};
 use candle_transformers::models::whisper::{
@@ -227,6 +226,11 @@ fn transcribe_chunk(res: &WhisperResource, pcm: &[f32]) -> Result<String, String
     let mel_len = mel.len();
     let mel_tensor = Tensor::from_vec(mel, (1, res.config.num_mel_bins, mel_len / res.config.num_mel_bins), &device)
         .map_err(|e| format!("mel tensor: {}", e))?;
+    // candle's pcm_to_mel appends its own padding; the encoder takes
+    // exactly one 30 s window (N_FRAMES = 3000 frames).
+    let mel_tensor = mel_tensor
+        .narrow(2, 0, m::N_FRAMES)
+        .map_err(|e| format!("mel narrow: {}", e))?;
 
     let mut model = res.model.lock().map_err(|e| format!("lock model: {}", e))?;
     model.reset_kv_cache();
@@ -238,18 +242,21 @@ fn transcribe_chunk(res: &WhisperResource, pcm: &[f32]) -> Result<String, String
     let mut tokens: Vec<u32> = vec![res.sot, res.transcribe, res.no_timestamps];
     let max_new = res.config.max_target_positions.min(224);
 
-    for _ in 0..max_new {
+    // candle's whisper decoder has no self-attention KV cache: every
+    // step must see the whole token sequence (SOT prefix + history).
+    // `flush` resets the cross-attention cache on the first step only.
+    for step in 0..max_new {
         let tokens_tensor =
             Tensor::new(tokens.as_slice(), &device).map_err(|e| format!("tokens tensor: {}", e))?;
         let tokens_tensor = tokens_tensor
             .unsqueeze(0)
             .map_err(|e| format!("unsqueeze: {}", e))?;
 
-        let last_token = tokens_tensor
-            .i((.., tokens.len() - 1..))
-            .map_err(|e| format!("slice last token: {}", e))?;
-
-        let dec = model.decoder_forward(&last_token, &audio_features, false)?;
+        let dec = model.decoder_forward(&tokens_tensor, &audio_features, step == 0)?;
+        let seq_len = tokens.len();
+        let dec = dec
+            .i((..1, seq_len - 1..))
+            .map_err(|e| format!("slice last position: {}", e))?;
         let logits = model.decoder_final_linear(&dec)?;
         let logits = logits
             .squeeze(0)

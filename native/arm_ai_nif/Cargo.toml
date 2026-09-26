@@ -79,13 +79,6 @@ serde_json          = { version = "1",                                          
 default = ["full"]
 full = ["llm", "onnx", "audio", "vision", "whisper", "fft"]
 
-# `pgo` declares the extern for __llvm_profile_write_file so we can
-# force-flush the profile counters before BEAM exits. Only enable
-# this for the profile-generate build (when RUSTFLAGS sets
-# -Cprofile-generate). Without this flag, pgo_flush_op returns 0
-# and the symbol is never referenced.
-pgo = []
-
 # Atomic capabilities (declare what you actually use):
 llm        = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn"]
 onnx       = ["dep:tract-onnx"]
@@ -97,8 +90,4 @@ fft = ["dep:rustfft"]
 # Composite use-case presets (resolve to atomic features):
 whisper          = ["llm", "audio", "dep:byteorder", "dep:serde_json", "dep:tokenizers"]
 chatbot          = ["llm"]
-voice-assistant  = ["whisper", "onnx", "vision"]                                  # voice in, optional TTS, optional camera
 yolo             = ["onnx", "vision"]
-piper-tts        = ["onnx", "audio"]
-sentence-rag     = ["onnx"]
-vision-only      = ["onnx", "vision"]

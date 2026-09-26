@@ -2,10 +2,7 @@ defmodule ArmAI.WrappersErrorTest do
   use ExUnit.Case, async: true
 
   # Contract tests for arm_ai's shim modules — they must never
-  # raise on unhappy paths. The Audio / Safetensors / Tokenizers
-  # tests that used to live here moved to:
-  #   - Audio.* (in the audio package)
-  #   - safetensors + tokenizers contracts (upstream Hex packages)
+  # raise on unhappy paths.
 
   describe "ArmAI.Performance (shim → CpuGovernor.Performance)" do
     test "with_performance/1 runs and returns the fun's value" do

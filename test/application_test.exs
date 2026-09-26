@@ -7,12 +7,12 @@ defmodule ArmAI.ApplicationTest do
   # observable post-boot state instead.
 
   describe "supervisor lifecycle" do
-    test "NxArm.Supervisor is alive after boot" do
-      assert is_pid(Process.whereis(NxArm.Supervisor))
+    test "ArmAI.Supervisor is alive after boot" do
+      assert is_pid(Process.whereis(ArmAI.Supervisor))
     end
 
     test "ArmAI.Application has boot_mode visible via config" do
-      mode = Application.get_env(:nx_arm, :boot_mode, :normal)
+      mode = Application.get_env(:arm_ai, :boot_mode, :normal)
       assert mode in [:normal, :recovery]
     end
   end
@@ -21,9 +21,9 @@ defmodule ArmAI.ApplicationTest do
     test "calling start/2 when supervisor already runs returns {:error, {:already_started, _}}" do
       # ApplicationTest verifies the contract — start/2 either creates
       # the Supervisor or reports it's already up. Either is acceptable.
-      Application.put_env(:nx_arm, :boot_mode, :recovery)
+      Application.put_env(:arm_ai, :boot_mode, :recovery)
       result = ArmAI.Application.start(:normal, [])
-      Application.delete_env(:nx_arm, :boot_mode)
+      Application.delete_env(:arm_ai, :boot_mode)
 
       assert match?({:ok, _pid}, result) or
              match?({:error, {:already_started, _pid}}, result)

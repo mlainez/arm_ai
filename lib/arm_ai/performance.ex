@@ -1,8 +1,7 @@
 defmodule ArmAI.Performance do
   @moduledoc """
   Thin shim delegating to `CpuGovernor.Performance` in the
-  standalone `cpu_governor` package. Kept so internal nx_arm
-  callers (model wrappers, etc.) continue working unchanged.
+  standalone `cpu_governor` package.
 
   New code should call `CpuGovernor.Performance` directly.
   """

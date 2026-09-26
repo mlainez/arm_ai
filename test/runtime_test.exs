@@ -31,23 +31,23 @@ defmodule ArmAI.RuntimeTest do
 
   describe "init_thread_pool/0" do
     test "honors :thread_count config" do
-      Application.put_env(:nx_arm, :thread_count, 1)
+      Application.put_env(:arm_ai, :thread_count, 1)
       result = ArmAI.Runtime.init_thread_pool()
-      Application.delete_env(:nx_arm, :thread_count)
+      Application.delete_env(:arm_ai, :thread_count)
       # Rayon is global one-shot — likely :already_initialised, which is fine
       assert match?({_, 1}, result) or match?({_, _, _, _}, result)
     end
 
     test "honors :thread_pool :all_cores config" do
-      Application.put_env(:nx_arm, :thread_pool, :all_cores)
+      Application.put_env(:arm_ai, :thread_pool, :all_cores)
       result = ArmAI.Runtime.init_thread_pool()
-      Application.delete_env(:nx_arm, :thread_pool)
+      Application.delete_env(:arm_ai, :thread_pool)
       assert match?({:no_pinning, n} when is_integer(n) and n > 0, result)
     end
 
     test "default path returns the 4-tuple (perf cluster init / already initialised)" do
-      Application.delete_env(:nx_arm, :thread_count)
-      Application.delete_env(:nx_arm, :thread_pool)
+      Application.delete_env(:arm_ai, :thread_count)
+      Application.delete_env(:arm_ai, :thread_pool)
       result = ArmAI.Runtime.init_thread_pool()
       assert match?({status, n, perf, source}
                     when status in [:ok, :already_initialised] and

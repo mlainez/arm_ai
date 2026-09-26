@@ -14,20 +14,20 @@ defmodule ArmAI.Application do
 
   @impl true
   def start(_type, _args) do
-    case Application.get_env(:nx_arm, :boot_mode, :normal) do
+    case Application.get_env(:arm_ai, :boot_mode, :normal) do
       :recovery ->
         Logger.warning(
           "[arm_ai] BOOT_MODE=:recovery — no thread-pool pinning, no governor changes"
         )
 
-        Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
+        Supervisor.start_link([], strategy: :one_for_one, name: ArmAI.Supervisor)
 
       _ ->
         auto_init_thread_pool()
         warm_up_dirty_schedulers()
         pin_normal_schedulers_to_efficiency()
         maybe_apply_boot_governor()
-        Supervisor.start_link([], strategy: :one_for_one, name: NxArm.Supervisor)
+        Supervisor.start_link([], strategy: :one_for_one, name: ArmAI.Supervisor)
     end
   end
 
@@ -71,12 +71,12 @@ defmodule ArmAI.Application do
 
         _ = Task.await_many(tasks, 5_000)
         Logger.info(
-          "[nx_arm] BEAM normal schedulers (#{n}) migrated to efficiency cluster #{inspect(eff)}"
+          "[arm_ai] BEAM normal schedulers (#{n}) migrated to efficiency cluster #{inspect(eff)}"
         )
       end
     end
   rescue
-    e -> Logger.warning("[nx_arm] normal-scheduler pinning failed: #{Exception.message(e)}")
+    e -> Logger.warning("[arm_ai] normal-scheduler pinning failed: #{Exception.message(e)}")
   catch
     _, _ -> :ok
   end
@@ -89,10 +89,10 @@ defmodule ArmAI.Application do
   #
   # Opt-in to always-on max clock via:
   #
-  #     config :nx_arm, governor_at_boot: :performance
+  #     config :arm_ai, governor_at_boot: :performance
   #
   defp maybe_apply_boot_governor do
-    case Application.get_env(:nx_arm, :governor_at_boot, :default) do
+    case Application.get_env(:arm_ai, :governor_at_boot, :default) do
       :default ->
         :ok
 
@@ -104,10 +104,10 @@ defmodule ArmAI.Application do
           end
 
         ArmAI.Performance.set_governor(cores, Atom.to_string(governor))
-        Logger.info("[nx_arm] applied CPU governor #{governor} to #{inspect(cores)}")
+        Logger.info("[arm_ai] applied CPU governor #{governor} to #{inspect(cores)}")
     end
   rescue
-    e -> Logger.warning("[nx_arm] boot governor policy crashed: #{Exception.message(e)}")
+    e -> Logger.warning("[arm_ai] boot governor policy crashed: #{Exception.message(e)}")
   end
 
   # Make sure every BEAM dirty-CPU scheduler thread gets a chance to
@@ -142,21 +142,21 @@ defmodule ArmAI.Application do
     case ArmAI.Runtime.init_thread_pool() do
       {:ok, n, perf, source} ->
         Logger.info(
-          "[nx_arm] pinned rayon pool to #{n} perf core(s) #{inspect(perf)} (source: #{source})"
+          "[arm_ai] pinned rayon pool to #{n} perf core(s) #{inspect(perf)} (source: #{source})"
         )
 
       {:already_initialised, n, perf, source} ->
         Logger.info(
-          "[nx_arm] rayon pool already initialised; perf cluster detected as #{n} core(s) #{inspect(perf)} (source: #{source})"
+          "[arm_ai] rayon pool already initialised; perf cluster detected as #{n} core(s) #{inspect(perf)} (source: #{source})"
         )
 
       {:no_pinning, n} ->
-        Logger.info("[nx_arm] using all #{n} cores (no perf-cluster pinning)")
+        Logger.info("[arm_ai] using all #{n} cores (no perf-cluster pinning)")
     end
   rescue
     e ->
       # Detection or NIF call failed (e.g. running on host without
       # the latest firmware). Log and continue with rayon defaults.
-      Logger.warning("[nx_arm] thread pool init failed: #{Exception.message(e)}; rayon defaults will apply")
+      Logger.warning("[arm_ai] thread pool init failed: #{Exception.message(e)}; rayon defaults will apply")
   end
 end

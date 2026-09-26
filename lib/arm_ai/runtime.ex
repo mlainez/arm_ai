@@ -1,6 +1,6 @@
 defmodule ArmAI.Runtime do
   @moduledoc """
-  Runtime configuration for the nx_arm CPU backend.
+  Runtime configuration for the `arm_ai` rayon thread pool.
 
   ## Thread pool
 
@@ -13,13 +13,13 @@ defmodule ArmAI.Runtime do
     * Workloads that want headroom for other BEAM schedulers, audio
       threads, or async I/O.
 
-  Set the count from application config:
+  `ArmAI.Application` calls `init_thread_pool/0` at boot, pinning the
+  pool to the perf cluster by default. Configure it with:
 
-      config :nx_arm, thread_count: 4
+      config :arm_ai, thread_count: 4          # explicit size, no pinning
+      config :arm_ai, thread_pool: :all_cores  # every core, no pinning
 
-  …then call `ArmAI.Runtime.init_thread_pool/0` at app start (before
-  any matmul or convolution touches rayon). Once initialised the
-  pool is fixed for the OS process lifetime.
+  Once initialised the pool is fixed for the OS process lifetime.
   """
 
   @doc """
@@ -31,13 +31,13 @@ defmodule ArmAI.Runtime do
 
   Override via app config:
 
-      config :nx_arm,
+      config :arm_ai,
         thread_pool: :perf_cluster      # default
       # or
-      config :nx_arm,
+      config :arm_ai,
         thread_pool: :all_cores
       # or
-      config :nx_arm,
+      config :arm_ai,
         thread_count: 4                 # explicit count, no pinning
 
   Returns a tuple describing what was set up:
@@ -51,11 +51,11 @@ defmodule ArmAI.Runtime do
           | {:no_pinning, pos_integer()}
   def init_thread_pool do
     cond do
-      n = Application.get_env(:nx_arm, :thread_count) ->
-        status = ArmAI.Native.init_thread_pool_op(n)
-        {status, n}
+      n = Application.get_env(:arm_ai, :thread_count) ->
+        _ = ArmAI.Native.init_thread_pool_op(n)
+        {:no_pinning, n}
 
-      Application.get_env(:nx_arm, :thread_pool, :perf_cluster) == :all_cores ->
+      Application.get_env(:arm_ai, :thread_pool, :perf_cluster) == :all_cores ->
         # No pinning: rayon picks default count = logical CPU count.
         n = ArmAI.Native.current_thread_count_op()
         {:no_pinning, n}

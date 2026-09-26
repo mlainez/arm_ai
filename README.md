@@ -1,174 +1,110 @@
-# nx_arm
+# arm_ai
 
 > ### ⚠️ Very early work — built for a workshop, not for production
 >
 > This package was written for the **Goatmire Elixir workshop** on running
 > Nerves on Fairphone 3 hardware. It exists for tinkering and teaching.
->
-> It is **not an actively maintained project** (yet). There are no
-> stability guarantees, APIs will change without notice, and parts of it
-> are wired-but-unproven. Treat it as a starting point to hack on, not as
-> a dependency to build a product on.
+> There are no stability guarantees and APIs will change without notice.
 >
 > See [`nerves_ai`](https://github.com/mlainez/nerves_ai) for the full
 > stack and the workshop context.
 
-An [Nx](https://github.com/elixir-nx/nx) backend for ARM
-CPUs via NEON intrinsics + rayon. Built for Nerves devices —
-Raspberry Pi, FP3, BeagleBone — where you need real ML throughput
-on the CPU without dragging in an OpenCL / NPU stack.
+Edge AI inference NIF for ARM CPUs, built for Nerves devices.
 
-## Status
+One Rustler NIF with:
 
-* **217 tests, 18 property tests** (~2000 randomized cases), 0
-  failures on every commit.
-* End-to-end autodiff verified: 300-step SGD training loop runs
-  on `NxArm.Backend` and converges to ground truth.
-* On-device benchmarks on FP3 (Cortex-A73 cluster):
-  * 256×256×256 f32 matmul: **9.8 GFLOPS sustained**
-  * 64×128×4000 prefill lm_head: **10.9 GFLOPS**
-  * Tiny-LM (4 layers, 2M params): prefill 196 ms, decode 83 ms/tok
+* hand-tuned NEON kernels (matmul, conv, int8/int4, attention, norms)
+  used by [`nx_arm`](https://github.com/mlainez/nx_arm) and the generic
+  libraries;
+* [candle](https://github.com/huggingface/candle) for quantized Llama
+  GGUF inference and Whisper speech-to-text;
+* [tract](https://github.com/sonos/tract) for ONNX inference;
+* symphonia + rubato for audio decode and resampling, and `image` +
+  `fast_image_resize` for image preprocessing.
 
-## What's in the box
+## Public API
 
-### Op coverage (native NIFs, not fallbacks)
-
-* **Elementwise**: NEON-vectorised add/subtract/multiply/divide,
-  exp / sigmoid / tanh polynomial approximations.
-* **Matmul**: cache-blocked NEON kernel with 4×8 register tile,
-  prefetching, K-blocking for L1 fit.
-* **Convolution**: direct conv2d, Winograd F(2,3) for 3×3
-  stride-1, im2col+GEMM for general kernels, depthwise +
-  pointwise fusion (the MobileNet block).
-* **Quantisation**: full int8 matmul (SDOT on ARMv8.2-A,
-  vmlal_s8+vpadalq fallback), int4 packed weights (GGUF Q4_0),
-  per-token activation scales, fp16/bf16 weight storage.
-* **LLM kernels**: Flash Attention V1 (streaming softmax),
-  RMSNorm, RoPE, KV cache, causal mask, repetition penalty,
-  top-k / top-p sampling.
-* **Production ops**: argmax/argmin, select, as_type, clip, pad,
-  gather, stack, sort/argsort, all/any/product, reverse — all
-  native NIFs covering the LLM/CV hot path.
-* **File loading**: GGUF v3 reader (header + metadata + tensor
-  catalogue + Q4_0 unpack), SafeTensors, memory-mapped loading.
-
-### Compiler-side patterns
-
-`NxArm.Compiler` recognises and fuses softmax,
-multiply→softmax→divide, layernorm, GELU, bias-add, dropout
-elimination, dead broadcast elimination, constant folding.
-
-### big.LITTLE topology
-
-On heterogeneous chips (Snapdragon big.LITTLE, Tegra, Apple, Pi
-5) the backend automatically detects the perf cluster at boot
-and pins both the rayon worker pool **and** the BEAM dirty CPU
-schedulers to it. Detection priority:
-
-1. `/sys/devices/system/cpu/cpu*/cpu_capacity` (DT-derived).
-2. `cpufreq/cpuinfo_max_freq` (highest cluster).
-3. `regs/identification/midr_el1` part-number table (A35..A715
-   + Kryo Gold/Silver + Apple silicon).
-4. Fallback: use all cores (no pinning).
+* `ArmAI.LlamaCandle` — load a GGUF file, generate greedily, get timing
+  stats. No Nx needed.
+* `ArmAI.NxPrimitivesBackend`, `ArmAI.LLMBackend`, `ArmAI.VisionBackend`,
+  `ArmAI.AudioBackend` — backends for `nx_primitives`, `infer_llm`,
+  `infer_vision` and `infer_audio`.
+* `ArmAI.Runtime` — rayon thread pool and CPU topology.
 
 ```elixir
-iex> ArmAI.Runtime.topology()
-%{source: "cpu_capacity", perf_cores: [4, 5, 6, 7], all_cores: [0..7]}
+{:ok, model} =
+  ArmAI.LlamaCandle.load("/data/models/tinyllama.gguf",
+    tokenizer: "/data/models/tinyllama-tokenizer.json")
+
+{reply, stats} =
+  ArmAI.LlamaCandle.generate(model,
+    prompt: "<|user|>\nWhat is the capital of France?</s>\n<|assistant|>\n",
+    max_new: 64,
+    stop_tokens: [2])
+# reply => "The capital of France is Paris."
 ```
 
-## Installation
+See `examples/chatbot` for a runnable script.
+
+## Install
 
 ```elixir
 defp deps do
-  [{:nx_arm, "~> 0.1"}]
+  [{:arm_ai, github: "mlainez/arm_ai"}]
 end
 ```
 
-Activate as the default backend in your project config:
+No precompiled release has been published yet, so the NIF always builds
+from source and the build machine needs a Rust toolchain. For a Nerves
+target, add its Rust target (for example
+`rustup target add aarch64-unknown-linux-gnu`); `ArmAI.Native` picks up
+the target and cross linker from the Nerves environment.
+
+### Cargo features
+
+The crate builds every capability by default (`full`). To shrink the
+NIF, pick features in your config:
 
 ```elixir
-# config/config.exs
-config :nx, default_backend: NxArm.Backend
+config :arm_ai, features: ["chatbot"]   # llm
+config :arm_ai, features: ["whisper"]   # llm + audio + tokenizers
+config :arm_ai, features: ["yolo"]      # onnx + vision
+config :arm_ai, features: ["onnx", "vision", "audio", "fft"]   # compose your own
 ```
 
-The NIF binaries are precompiled and fetched on first
-`mix deps.compile`; no Rust toolchain required. See
-[`docs/deployment.md`](docs/deployment.md) for the full target
-matrix and override knobs.
+Atomic features: `llm`, `whisper`, `onnx`, `audio`, `vision`, `fft`.
+Calling a function whose feature was left out raises.
 
-## Quick example
+### Runtime configuration
 
 ```elixir
-# Inference: a 2-layer transformer forward
-mask = ArmAI.LLM.causal_mask(seq) |> Nx.broadcast({n_heads, seq, seq})
-x =
-  Enum.reduce(layers, x, fn ws, acc ->
-    a = ArmAI.LLM.rmsnorm(acc, ws.norm1)
-    a = attention(a, ws.w_q, ws.w_k, ws.w_v, ws.w_o, mask, n_heads)
-    x1 = Nx.add(acc, a)
-    f = ArmAI.LLM.rmsnorm(x1, ws.norm2)
-    Nx.add(x1, ffn(f, ws.w_gate, ws.w_up, ws.w_down))
-  end)
+config :arm_ai,
+  thread_pool: :perf_cluster,     # default: pin rayon to the big cores
+  # thread_pool: :all_cores,
+  # thread_count: 4,              # explicit size, no pinning
+  governor_at_boot: :default      # or e.g. :performance
 ```
 
-```elixir
-# Training: SGD with autodiff
-defn step(w, b, x, y, lr) do
-  {loss, {dw, db}} =
-    value_and_grad({w, b}, fn {ww, bb} ->
-      pred = Nx.dot(x, ww) + bb
-      Nx.sum((pred - y) ** 2)
-    end)
+## Limits
 
-  {w - dw * lr, b - db * lr, loss}
-end
-```
+* ONNX: inputs must be float tensors (f16 models run in f32). Models with
+  integer inputs, such as text encoders, Silero VAD or Piper TTS, are not
+  supported yet.
+* LLM: GGUF files with `llama.*` metadata (Llama, TinyLlama, SmolLM,
+  Mistral-style). Greedy decoding only.
+* Whisper: candle GGUF or safetensors checkpoints; whisper.cpp `ggml-*.bin`
+  files do not load. Greedy, no timestamps.
 
-## Architecture targets
+## Performance
 
-| Triple                              | Typical board                    |
-|-------------------------------------|----------------------------------|
-| `aarch64-unknown-linux-gnu`         | Pi 3B+/4/5 (64-bit), FP3         |
-| `aarch64-unknown-linux-musl`        | Nerves aarch64 musl              |
-| `armv7-unknown-linux-gnueabihf`     | Pi Zero 2W, BeagleBone Black     |
-| `armv7-unknown-linux-musleabihf`    | Nerves armv7 musl                |
-| `x86_64-unknown-linux-{gnu,musl}`   | Dev, CI                          |
-| `{x86_64,aarch64}-apple-darwin`     | Mac dev box                      |
+On a Fairphone 3 (Snapdragon 632, 4× Cortex-A73), TinyLlama 1.1B Q4_K_M
+decodes at about 4.7 tokens/s, close to the memory-bandwidth limit. See
+`docs/perf_llm.md` for the measurements.
 
-## Honest limitations
+## Toolchain
 
-* **Fallback ops**: `triangular_solve`, `lu`, `fft`/`ifft`,
-  `indexed_add`/`put`, `window_scatter_max`/`min` still route to
-  `Nx.BinaryBackend`. Won't break correctness; will be slow if
-  hit in a hot loop. Open an issue with the use case and they'll
-  jump in priority.
-* **Linear algebra**: no QR/SVD; same as above — file an issue
-  if you need them.
-* **No GPU/NPU**: this is a CPU-only backend by design.
-  `nx_opencl` exists for the Adreno/Mali side of the same
-  hardware.
-
-## Layout
-
-```
-lib/nx_arm/
-├── application.ex      # boot: topology detect + thread-pool pin
-├── backend.ex          # Nx.Backend impl (op dispatch)
-├── compiler.ex         # Nx.Defn.Compiler pattern fusion
-├── llm.ex              # transformer helpers
-├── kv_cache.ex         # decoder cache
-├── sampling.ex         # greedy/top-k/top-p + repetition penalty
-├── gguf.ex             # GGUF v3 reader
-├── safetensors.ex      # SafeTensors reader
-├── runtime.ex          # topology / thread-pool diagnostics
-└── bench/              # microbenchmarks
-native/nx_arm_nif/src/
-├── lib.rs              # NIF entry points
-├── shape_ops.rs        # NEON kernels: matmul, conv, attention, ...
-├── conv_int8.rs        # quantised conv
-├── ops.rs              # production ops (argmax, select, sort, ...)
-└── topology.rs         # CPU cluster detection + pinning
-```
+Built and tested with Erlang/OTP 29.1.1, Elixir 1.20.4 and stable Rust,
+matching the official Nerves systems (see `.tool-versions`).
 
 ## License
 

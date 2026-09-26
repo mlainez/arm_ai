@@ -2,7 +2,7 @@
 
 This is the honest report on where TinyLlama (and Q4_K_M class
 quantised LLMs in general) lands on ARM CPUs with the current
-nx_arm stack. Updated 2026-05-21 after exhausting every generic
+arm_ai stack. Updated 2026-05-21 after exhausting every generic
 ARM optimisation that's safe to ship.
 
 ## The number
@@ -43,11 +43,11 @@ All "generic ARM" — nothing FP3-specific.
 
 | Optimisation | Δ tok/s | Status |
 |---|---|---|
-| Release profile (LTO=fat, codegen-units=1, panic=abort, strip) | +~0.1 | kept (see [Cargo.toml](../native/nx_arm_nif/Cargo.toml)) |
+| Release profile (LTO=fat, codegen-units=1, panic=abort, strip) | +~0.1 | kept (see [Cargo.toml](../native/arm_ai_nif/Cargo.toml)) |
 | Per-token argmax inline (skip per-step tensor alloc) | ~0 | kept (cleaner code) |
 | Vendored quantized_llama with in-place KvCache | **-0.17** | reverted: KvCache.current_data returns narrow views that aren't contiguous → downstream matmul triggers extra `.contiguous()` copies that exceed the saved `cat` allocations |
 | mimalloc as `#[global_allocator]` | **boot loop** | reverted: TLS init order vs the BEAM scheduler under Nerves rootfs |
-| PGO (profile-guided optimisation) | **~0** | tried and shipped: instrumented build captured 3 MB of profile data on-device, llvm-profdata merged, optimised rebuild deployed. **No measurable lift.** Matmul kernels don't have the branchy code paths PGO specialises on. Captured here as evidence that PGO ≠ free perf for ML workloads. |
+| PGO (profile-guided optimisation) | **~0** | tried, not kept: instrumented build captured 3 MB of profile data on-device, llvm-profdata merged, optimised rebuild tested. **No measurable lift.** Matmul kernels don't have the branchy code paths PGO specialises on. Captured here as evidence that PGO ≠ free perf for ML workloads. |
 
 ## Why PGO didn't help
 
@@ -89,14 +89,11 @@ These are real but each costs more than what we've spent so far:
    loop is already entirely in Rust; further BEAM-side gains
    would need a redesign of how Elixir consumes streaming output.
 
-## Implications for the meta-package
+## What this means in practice
 
-- The example `01_chatbot` README should quote **4.7 tok/s on a
-  Snapdragon 632-class device** as the realistic baseline.
-- Recommendation table in [readiness.md](readiness.md) should
-  highlight that LLM-heavy workloads benefit substantially from
-  newer ARM cores; the framework itself doesn't change.
-- For users who *need* sub-200ms per token streaming on
-  phone-class ARM, the right answer today is to use a smaller
-  model (SmolLM-135M Q4_K_M lands at ~13 tok/s on the same FP3)
-  or to wait for an A76+ target SBC.
+- Expect about **4.7 tok/s** for a 1B Q4_K_M model on a Snapdragon
+  632-class device. That is the realistic baseline, not a bug.
+- LLM-heavy workloads benefit substantially from newer ARM cores
+  (A76 and later) with more memory bandwidth; the code doesn't change.
+- For sub-200 ms per token on phone-class ARM, use a smaller model:
+  SmolLM-135M Q4_K_M measured about 13 tok/s on the same Fairphone 3.

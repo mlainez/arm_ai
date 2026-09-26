@@ -29,9 +29,16 @@ pub fn load(path: &str) -> Result<OnnxModelResource, String> {
         .model_for_path(path)
         .map_err(|e| format!("onnx::model_for_path({}): {}", path, e))?;
 
-    let typed = proto
+    let mut typed = proto
         .into_typed()
         .map_err(|e| format!("into_typed: {}", e))?;
+
+    // Run half-precision exports (e.g. the official Ultralytics YOLOv5
+    // ONNX files) in f32: several tract ops have no f16 kernels, and f32
+    // is what the NEON paths are tuned for. No-op for f32 models.
+    typed
+        .transform(&tract_onnx::tract_core::floats::FloatPrecisionTranslator::<f16, f32>::with_filter(|_| true))
+        .map_err(|e| format!("f16 -> f32: {}", e))?;
 
     let decluttered = typed
         .into_decluttered()
@@ -61,7 +68,12 @@ pub fn load(path: &str) -> Result<OnnxModelResource, String> {
         })
         .collect();
 
+    // Optimise after capturing the names: optimisation picks the tuned
+    // kernels (without it a YOLOv5n forward pass is ~50x slower) and
+    // may rename nodes.
     let runnable = decluttered
+        .into_optimized()
+        .map_err(|e| format!("into_optimized: {}", e))?
         .into_runnable()
         .map_err(|e| format!("into_runnable: {}", e))?;
 
@@ -87,7 +99,7 @@ pub fn run(
 
     // Build tract Tensors in declared input order.
     let mut input_tensors: Vec<TValue> = Vec::with_capacity(res.input_names.len());
-    for name in &res.input_names {
+    for (i, name) in res.input_names.iter().enumerate() {
         let (shape, data) = inputs
             .get(name)
             .ok_or_else(|| format!("missing input '{}'", name))?;
@@ -95,6 +107,23 @@ pub fn run(
         let t = tract_ndarray::Array::from_shape_vec(shape.clone(), data.clone())
             .map_err(|e| format!("input '{}' reshape: {}", name, e))?
             .into_tensor();
+
+        // Inputs arrive as f32. Models exported in half precision (e.g.
+        // the official Ultralytics YOLOv5 ONNX files) declare f16 inputs,
+        // so cast to the declared float type. Integer inputs are rejected
+        // by tract's own type check.
+        let declared = model
+            .model()
+            .input_fact(i)
+            .map_err(|e| format!("input '{}' fact: {}", name, e))?
+            .datum_type;
+        let t = if declared != f32::datum_type() && declared.is_float() {
+            t.cast_to_dt(declared)
+                .map_err(|e| format!("cast input '{}' to {:?}: {}", name, declared, e))?
+                .into_owned()
+        } else {
+            t
+        };
 
         input_tensors.push(t.into());
     }

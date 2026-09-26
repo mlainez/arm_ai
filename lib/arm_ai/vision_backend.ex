@@ -6,64 +6,69 @@ defmodule ArmAI.VisionBackend do
       config :infer_vision, backend: ArmAI.VisionBackend
   """
 
-  if Code.ensure_loaded?(InferVision.Backend) do
-    @behaviour InferVision.Backend
-  end
+  # Implements `InferVision.Backend`. The behaviour isn't declared because that
+  # package depends on arm_ai, so it isn't loaded when this compiles;
+  # nerves_ai's test suite checks every callback is present.
 
-  @impl true
+  # tract-onnx runs models with f32 inputs only: the NIF builds f32
+  # tensors and tract checks them against the model's declared input
+  # types. Outputs are always returned as f32.
+
   def onnx_load(path, _opts) do
-    if not function_exported?(ArmAI.Native, :onnx_load_op, 1) do
-      {:error, :onnx_feature_disabled}
-    else
-      try do
-        case ArmAI.Native.onnx_load_op(path) do
-          {:error, reason} -> {:error, reason}
-          handle -> {:ok, handle}
-        end
-      rescue
-        e -> {:error, e}
+    case ArmAI.Native.onnx_load_op(path) do
+      {resource, input_names, output_names} ->
+        {:ok, %{resource: resource, input_names: input_names, output_names: output_names}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    e in ErlangError -> {:error, e.original}
+    e -> {:error, e}
+  end
+
+  def onnx_run(%{resource: resource}, inputs, _opts) when is_map(inputs) do
+    with {:ok, args} <- encode_onnx_inputs(inputs) do
+      case ArmAI.Native.onnx_run_op(resource, args) do
+        {:error, _} = err ->
+          err
+
+        outputs when is_list(outputs) ->
+          Map.new(outputs, fn {name, shape, bin} ->
+            {name, bin |> Nx.from_binary(:f32) |> Nx.reshape(List.to_tuple(shape))}
+          end)
       end
     end
+  rescue
+    e in ErlangError -> {:error, e.original}
   end
 
-  @impl true
-  def onnx_run(handle, inputs, _opts) when is_map(inputs) do
-    bins =
-      Enum.map(inputs, fn {name, tensor} ->
-        {name, Nx.to_binary(tensor), Tuple.to_list(Nx.shape(tensor))}
-      end)
+  def onnx_input_names(%{input_names: names}), do: names
 
-    case ArmAI.Native.onnx_run_op(handle, bins) do
-      {:error, _} = err ->
-        err
+  def onnx_output_names(%{output_names: names}), do: names
 
-      outputs when is_list(outputs) ->
-        outputs
-        |> Enum.into(%{}, fn {name, bin, shape, _dtype} ->
-          {name, Nx.from_binary(bin, :f32) |> Nx.reshape(List.to_tuple(shape))}
-        end)
-    end
+  defp encode_onnx_inputs(inputs) do
+    Enum.reduce_while(inputs, {:ok, []}, fn {name, tensor}, {:ok, acc} ->
+      case Nx.type(tensor) do
+        {:f, _} ->
+          t = Nx.as_type(tensor, :f32)
+          {:cont, {:ok, [{name, Tuple.to_list(Nx.shape(t)), Nx.to_binary(t)} | acc]}}
+
+        type ->
+          {:halt, {:error, {:unsupported_input_type, name, type}}}
+      end
+    end)
   end
 
-  @impl true
-  def onnx_input_specs(handle), do: ArmAI.Native.onnx_input_specs_op(handle)
-
-  @impl true
-  def onnx_output_specs(handle), do: ArmAI.Native.onnx_output_specs_op(handle)
-
-  @impl true
   def decode_to_rgb8(path) do
-    if not function_exported?(ArmAI.Native, :vision_decode_to_rgb8_op, 1) do
-      {:error, :vision_feature_disabled}
-    else
-      case ArmAI.Native.vision_decode_to_rgb8_op(path) do
-        {:error, _} = err -> err
-        {bin, w, h} -> {:ok, {bin, w, h}}
-      end
+    case ArmAI.Native.vision_decode_to_rgb8_op(path) do
+      {:error, _} = err -> err
+      {bin, w, h} -> {:ok, {bin, w, h}}
     end
+  rescue
+    e in ErlangError -> {:error, e.original}
   end
 
-  @impl true
   def load_for_classifier(path, opts) do
     {out_h, out_w} = Keyword.fetch!(opts, :size)
     mean = Keyword.get(opts, :mean, {0.485, 0.456, 0.406})
@@ -71,7 +76,10 @@ defmodule ArmAI.VisionBackend do
     layout = Keyword.get(opts, :layout, :nchw)
 
     bin =
-      ArmAI.Native.vision_load_for_classifier_op(path, out_h, out_w, mean, std, layout)
+      case ArmAI.Native.vision_load_for_classifier_op(path, out_h, out_w, mean, std, layout) do
+        {:error, reason} -> raise ArgumentError, "cannot load image #{inspect(path)}: #{inspect(reason)}"
+        bin -> bin
+      end
 
     shape =
       case layout do

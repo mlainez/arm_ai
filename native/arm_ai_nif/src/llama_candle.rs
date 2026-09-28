@@ -61,6 +61,18 @@ pub fn generate_greedy(
     max_new: usize,
     stop_tokens: &[u32],
 ) -> Result<GenerateResult, String> {
+    generate_greedy_with(res, prompt, max_new, stop_tokens, &mut |_| {})
+}
+
+/// Like `generate_greedy`, calling `on_token` with each token as soon
+/// as it is chosen.
+pub fn generate_greedy_with(
+    res: &LlamaResource,
+    prompt: &[u32],
+    max_new: usize,
+    stop_tokens: &[u32],
+    on_token: &mut dyn FnMut(u32),
+) -> Result<GenerateResult, String> {
     if max_new == 0 || prompt.is_empty() {
         return Ok(GenerateResult { tokens: Vec::new(), prefill_us: 0, decode_us: 0 });
     }
@@ -89,6 +101,7 @@ pub fn generate_greedy(
 
     let mut next = argmax_u32(&last_logits)?;
     let mut generated = vec![next];
+    on_token(next);
 
     let decode_start = std::time::Instant::now();
 
@@ -110,6 +123,7 @@ pub fn generate_greedy(
 
         next = argmax_u32(&step_logits)?;
         generated.push(next);
+        on_token(next);
         offset += 1;
     }
 

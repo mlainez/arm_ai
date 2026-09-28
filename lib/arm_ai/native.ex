@@ -96,17 +96,25 @@ defmodule ArmAI.Native do
   input axis `i` maps to (Nx semantics). `element_size` is the byte
   width of one element — 4 for f32, 8 for s64, 1 for u8, etc.
   """
-  @spec broadcast_op(binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()], non_neg_integer()) :: binary()
+  @spec broadcast_op(
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [non_neg_integer()],
+          non_neg_integer()
+        ) :: binary()
   def broadcast_op(_input, _in_shape, _out_shape, _axes, _element_size),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc "Generic n-D transpose. `axes[i]` is the input axis that becomes output axis `i`."
-  @spec transpose_op(binary(), [non_neg_integer()], [non_neg_integer()], non_neg_integer()) :: binary()
+  @spec transpose_op(binary(), [non_neg_integer()], [non_neg_integer()], non_neg_integer()) ::
+          binary()
   def transpose_op(_input, _in_shape, _axes, _element_size),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc "Concatenate tensors along an axis. All shapes must match outside `axis`."
-  @spec concatenate_op([binary()], [[non_neg_integer()]], non_neg_integer(), non_neg_integer()) :: binary()
+  @spec concatenate_op([binary()], [[non_neg_integer()]], non_neg_integer(), non_neg_integer()) ::
+          binary()
   def concatenate_op(_tensors, _shapes, _axis, _element_size),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -198,7 +206,18 @@ defmodule ArmAI.Native do
 
   Output `{B, H, Sq, D}` raw f32 LE bytes.
   """
-  @spec flash_attention_f32_op(binary(), binary(), binary(), float(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer(), boolean()) :: binary()
+  @spec flash_attention_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          float(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          boolean()
+        ) :: binary()
   def flash_attention_f32_op(_q, _k, _v, _scale, _b, _h, _sq, _sk, _d, _causal),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -207,7 +226,16 @@ defmodule ArmAI.Native do
   no-bias linear. `activation` is one of `"none" | "relu" | "relu6"
   | "gelu" | "sigmoid" | "tanh"` (chained in the same pass).
   """
-  @spec linear_f32_op(binary(), binary(), binary(), String.t(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec linear_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          String.t(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def linear_f32_op(_act, _weights, _bias, _activation, _b, _m, _n, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -216,7 +244,13 @@ defmodule ArmAI.Native do
   `activation` is one of `"none" | "relu" | "relu6" | "gelu" | "sigmoid" | "tanh"`.
   Saves the intermediate write+read between bias-add and activation.
   """
-  @spec bias_add_activation_f32_op(binary(), binary(), String.t(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec bias_add_activation_f32_op(
+          binary(),
+          binary(),
+          String.t(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def bias_add_activation_f32_op(_act, _bias, _activation, _outer, _inner),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -250,19 +284,36 @@ defmodule ArmAI.Native do
   `gamma`/`beta` length-`inner`. Single pass per row: mean + variance,
   then `gamma * (x - mean) / sqrt(var + eps) + beta`.
   """
-  @spec layernorm_f32_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer(), float()) :: binary()
+  @spec layernorm_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          float()
+        ) :: binary()
   def layernorm_f32_op(_input, _gamma, _beta, _n_outer, _inner, _epsilon),
     do: :erlang.nif_error(:nif_not_loaded)
 
   # ── Conv2D (NEON int8 + f32) ───────────────────────────
 
   @doc "2-D NEON int8 conv (f32 activations × int8 weights × f32 per-out-channel scales)."
-  @spec conv2d_int8_op(binary(), binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) :: binary()
+  @spec conv2d_int8_op(
+          binary(),
+          binary(),
+          binary(),
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [non_neg_integer()]
+        ) :: binary()
   def conv2d_int8_op(_input, _weight, _scales, _bias, _dims, _stride, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc "Pure-f32 NEON conv2d. Same NHWC + flat-weight layout as conv2d_int8_op, no scales."
-  @spec conv2d_f32_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) :: binary()
+  @spec conv2d_f32_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [
+          non_neg_integer()
+        ]) :: binary()
   def conv2d_f32_op(_input, _weight, _bias, _dims, _stride, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -271,7 +322,9 @@ defmodule ArmAI.Native do
   `{Cout, 3, 3, Cin}` raw f32 LE. `dims` is `[N, H_in, W_in, Cin,
   Cout]`; `padding` is `[pad_top, pad_bottom, pad_left, pad_right]`.
   """
-  @spec conv2d_f32_winograd_3x3_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()]) :: binary()
+  @spec conv2d_f32_winograd_3x3_op(binary(), binary(), binary(), [non_neg_integer()], [
+          non_neg_integer()
+        ]) :: binary()
   def conv2d_f32_winograd_3x3_op(_input, _weight, _bias, _dims, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -281,7 +334,14 @@ defmodule ArmAI.Native do
   (>~64): packs receptive fields into a contiguous matrix and reuses
   the cache-blocked NEON matmul kernel.
   """
-  @spec conv2d_f32_im2col_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) :: binary()
+  @spec conv2d_f32_im2col_op(
+          binary(),
+          binary(),
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [non_neg_integer()]
+        ) :: binary()
   def conv2d_f32_im2col_op(_input, _weight, _bias, _dims, _stride, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -321,7 +381,14 @@ defmodule ArmAI.Native do
   `{Cin, Kh, Kw}` raw f32 LE. NHWC input + NHWC output. Used by
   MobileNet/EfficientNet's per-channel spatial filter blocks.
   """
-  @spec depthwise_conv2d_f32_op(binary(), binary(), binary(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) :: binary()
+  @spec depthwise_conv2d_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [non_neg_integer()]
+        ) :: binary()
   def depthwise_conv2d_f32_op(_input, _weight, _bias, _dims, _stride, _padding),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -329,12 +396,20 @@ defmodule ArmAI.Native do
   Bilinear resize for HWC u8 image buffers. Input is `in_h * in_w *
   channels` bytes; output is `out_h * out_w * channels` bytes.
   """
-  @spec bilinear_resize_u8_op(binary(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec bilinear_resize_u8_op(
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def bilinear_resize_u8_op(_input, _in_h, _in_w, _channels, _out_h, _out_w),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc "RMSNorm along the last axis. Pre-attention / pre-MLP norm in Llama/Mistral/Phi/Qwen."
-  @spec rmsnorm_f32_op(binary(), binary(), non_neg_integer(), non_neg_integer(), float()) :: binary()
+  @spec rmsnorm_f32_op(binary(), binary(), non_neg_integer(), non_neg_integer(), float()) ::
+          binary()
   def rmsnorm_f32_op(_input, _gamma, _n_outer, _inner, _epsilon),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -342,12 +417,26 @@ defmodule ArmAI.Native do
   Rotary Position Embedding (RoPE) for Q/K tensors. `positions` is
   s64 LE. `inv_freq` is the precomputed `1/base^(2k/head_dim)` series.
   """
-  @spec rope_f32_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec rope_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def rope_f32_op(_input, _positions, _inv_freq, _n_rows, _head_dim, _heads_per_token),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc "fp16 weight × f32 activation matmul. Weights converted via NEON vcvt_f32_f16 inline."
-  @spec dequant_matmul_f16_f32_op(binary(), binary(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec dequant_matmul_f16_f32_op(
+          binary(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def dequant_matmul_f16_f32_op(_act, _weights_f16, _b, _m, _n, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -360,7 +449,15 @@ defmodule ArmAI.Native do
   returning f32. Uses SDOT (ARMv8.2-A `dotprod`) when runtime-detected,
   vmlal_s8 + vpadalq_s16 fallback otherwise.
   """
-  @spec int8_matmul_f32_op(binary(), binary(), binary(), float(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec int8_matmul_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          float(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def int8_matmul_f32_op(_a, _w, _w_scales, _act_scale, _m, _n, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -370,7 +467,14 @@ defmodule ArmAI.Native do
   layout: `[N, K/2]` packed bytes (low nibble = even k); scales
   layout: `[N, K/32]` f32 LE. Returns f32 output `[M, N]`.
   """
-  @spec int4_matmul_f32_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec int4_matmul_f32_op(
+          binary(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def int4_matmul_f32_op(_a, _w_packed, _w_scales, _m, _n, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -380,7 +484,13 @@ defmodule ArmAI.Native do
   matmuls (lm_head, per-layer projections during token-by-token
   inference). Returns f32 output `[1, N]`.
   """
-  @spec int4_matmul_gemv_neon_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec int4_matmul_gemv_neon_op(
+          binary(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def int4_matmul_gemv_neon_op(_a, _w_packed, _w_scales, _n, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -391,7 +501,13 @@ defmodule ArmAI.Native do
   ARMv8.0 (A53/A72/A73) which lacks dotprod. Same return layout
   as `int4_matmul_gemv_neon_op`.
   """
-  @spec int4_matmul_gemv_q4_x_q8_neon_op(binary(), binary(), binary(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec int4_matmul_gemv_q4_x_q8_neon_op(
+          binary(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def int4_matmul_gemv_q4_x_q8_neon_op(_a, _w_packed, _w_scales, _n, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -453,6 +569,20 @@ defmodule ArmAI.Native do
           [non_neg_integer()]
         ) :: {[non_neg_integer()], non_neg_integer(), non_neg_integer()}
   def llama_candle_generate_op(_model, _prompt, _max_new, _stop_tokens),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Same as `llama_candle_generate_op/4`, also sending `{:llama_token, id}`
+  to `pid` as each token is chosen.
+  """
+  @spec llama_candle_stream_op(
+          reference(),
+          [non_neg_integer()],
+          non_neg_integer(),
+          [non_neg_integer()],
+          pid()
+        ) :: {[non_neg_integer()], non_neg_integer(), non_neg_integer()}
+  def llama_candle_stream_op(_model, _prompt, _max_new, _stop_tokens, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
   # --- Embeddings / RAG primitives ---
@@ -555,7 +685,15 @@ defmodule ArmAI.Native do
   `int8_matmul_f32_op` but with per-row dequant, recovering accuracy
   on outlier-heavy activation distributions.
   """
-  @spec int8_matmul_f32_per_token_op(binary(), binary(), binary(), binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: binary()
+  @spec int8_matmul_f32_per_token_op(
+          binary(),
+          binary(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: binary()
   def int8_matmul_f32_per_token_op(_a, _w, _act_scales, _w_scales, _m, _n, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -563,7 +701,8 @@ defmodule ArmAI.Native do
   Quantize an `(M, K)` f32 activation matrix to int8 with symmetric
   per-token scales. Returns `{quantised_bin, scales_bin}`.
   """
-  @spec quantize_int8_per_token_op(binary(), non_neg_integer(), non_neg_integer()) :: {binary(), binary()}
+  @spec quantize_int8_per_token_op(binary(), non_neg_integer(), non_neg_integer()) ::
+          {binary(), binary()}
   def quantize_int8_per_token_op(_a, _m, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -607,7 +746,8 @@ defmodule ArmAI.Native do
   Status is `:ok` on first call, `:already_initialised` if the pool
   is already up.
   """
-  @spec init_perf_cluster_op() :: {:ok | :already_initialised, pos_integer(), [non_neg_integer()], String.t()}
+  @spec init_perf_cluster_op() ::
+          {:ok | :already_initialised, pos_integer(), [non_neg_integer()], String.t()}
   def init_perf_cluster_op,
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -674,7 +814,14 @@ defmodule ArmAI.Native do
   def clip_op(_input, _dtype, _min, _max),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  @spec pad_op(binary(), [non_neg_integer()], [non_neg_integer()], [{integer(), integer(), integer()}], binary(), pos_integer()) :: binary()
+  @spec pad_op(
+          binary(),
+          [non_neg_integer()],
+          [non_neg_integer()],
+          [{integer(), integer(), integer()}],
+          binary(),
+          pos_integer()
+        ) :: binary()
   def pad_op(_input, _in_shape, _out_shape, _pad_config, _fill, _elem_size),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -715,7 +862,8 @@ defmodule ArmAI.Native do
   scales. K must be a multiple of 32. Returns `{packed_bin,
   scales_bin}`.
   """
-  @spec quantize_int4_q4_0_op(binary(), non_neg_integer(), non_neg_integer()) :: {binary(), binary()}
+  @spec quantize_int4_q4_0_op(binary(), non_neg_integer(), non_neg_integer()) ::
+          {binary(), binary()}
   def quantize_int4_q4_0_op(_w, _n, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 

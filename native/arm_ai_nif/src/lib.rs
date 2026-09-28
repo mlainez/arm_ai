@@ -1400,7 +1400,7 @@ fn current_thread_count_op() -> usize {
 }
 
 mod atoms {
-    rustler::atoms! { ok, already_initialised, nhwc, nchw }
+    rustler::atoms! { ok, already_initialised, nhwc, nchw, llama_token }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1674,6 +1674,27 @@ fn llama_candle_generate_op(
 ) -> NifResult<(Vec<u32>, u64, u64)> {
     let result = llama_candle::generate_greedy(&model, &prompt, max_new, &stop_tokens)
         .map_err(|e| rustler::Error::Term(Box::new(format!("candle generate: {}", e))))?;
+    Ok((result.tokens, result.prefill_us, result.decode_us))
+}
+
+/// Like `llama_candle_generate_op`, also sending `{:llama_token, id}` to
+/// `pid` as each token is chosen.
+#[cfg(feature = "llm")]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn llama_candle_stream_op(
+    env: Env,
+    model: ResourceArc<llama_candle::LlamaResource>,
+    prompt: Vec<u32>,
+    max_new: usize,
+    stop_tokens: Vec<u32>,
+    pid: rustler::LocalPid,
+) -> NifResult<(Vec<u32>, u64, u64)> {
+    let mut send_token = |token: u32| {
+        let _ = env.send(&pid, (atoms::llama_token(), token));
+    };
+    let result =
+        llama_candle::generate_greedy_with(&model, &prompt, max_new, &stop_tokens, &mut send_token)
+            .map_err(|e| rustler::Error::Term(Box::new(format!("candle generate: {}", e))))?;
     Ok((result.tokens, result.prefill_us, result.decode_us))
 }
 

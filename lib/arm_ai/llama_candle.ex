@@ -74,22 +74,7 @@ defmodule ArmAI.LlamaCandle do
   """
   @spec generate(t(), keyword()) :: {[non_neg_integer()] | String.t(), map()}
   def generate(%__MODULE__{handle: handle, tokenizer: tokenizer}, opts) do
-    {prompt, return_string?} =
-      cond do
-        text = Keyword.get(opts, :prompt) ->
-          if tokenizer == nil do
-            raise ArgumentError, "a string :prompt requires load/2 with a `tokenizer:` path"
-          end
-
-          {:ok, encoding} = Tokenizers.Tokenizer.encode(tokenizer, text)
-          {Tokenizers.Encoding.get_ids(encoding), true}
-
-        prompt = Keyword.get(opts, :prompt_tokens) ->
-          {prompt, false}
-
-        true ->
-          raise ArgumentError, "pass :prompt (string) or :prompt_tokens (list)"
-      end
+    {prompt, return_string?} = encode_prompt(tokenizer, opts)
 
     max_new = Keyword.get(opts, :max_new, 16)
     stop_tokens = Keyword.get(opts, :stop_tokens, [])
@@ -131,6 +116,101 @@ defmodule ArmAI.LlamaCandle do
       CpuGovernor.Performance.with_performance(do_run)
     else
       do_run.()
+    end
+  end
+
+  @doc """
+  Like `generate/2` with a string `:prompt`, but returns a lazy `Stream`
+  of text pieces as the model produces them, so the answer can be shown
+  while it's written:
+
+      model
+      |> ArmAI.LlamaCandle.stream(prompt: prompt, max_new: 128, stop_tokens: [2])
+      |> Enum.each(&IO.write/1)
+
+  Takes the same options as `generate/2`, except `:prompt_tokens`. The
+  stop token is not emitted. Generation runs in a separate process;
+  stopping the stream early doesn't interrupt the model call, which
+  finishes in the background.
+  """
+  @spec stream(t(), keyword()) :: Enumerable.t()
+  def stream(%__MODULE__{handle: handle, tokenizer: tokenizer}, opts) do
+    if Keyword.get(opts, :prompt) == nil or tokenizer == nil do
+      raise ArgumentError, "stream/2 needs a string :prompt and load/2 with a `tokenizer:` path"
+    end
+
+    {prompt, true} = encode_prompt(tokenizer, opts)
+    max_new = Keyword.get(opts, :max_new, 16)
+    stop_tokens = Keyword.get(opts, :stop_tokens, [])
+    governor? = Keyword.get(opts, :performance_governor, true)
+
+    Stream.resource(
+      fn ->
+        owner = self()
+
+        run = fn ->
+          ArmAI.Native.llama_candle_stream_op(handle, prompt, max_new, stop_tokens, owner)
+        end
+
+        task =
+          Task.async(fn ->
+            if governor?, do: CpuGovernor.Performance.with_performance(run), else: run.()
+          end)
+
+        {task, [], ""}
+      end,
+      fn
+        :done ->
+          {:halt, :done}
+
+        {task, ids, text} = acc ->
+          receive do
+            {:llama_token, id} ->
+              if id in stop_tokens do
+                {[], acc}
+              else
+                ids = ids ++ [id]
+                {:ok, new_text} = Tokenizers.Tokenizer.decode(tokenizer, ids)
+                {[new_piece(text, new_text)], {task, ids, new_text}}
+              end
+
+            {ref, _result} when ref == task.ref ->
+              Process.demonitor(ref, [:flush])
+              {:halt, :done}
+
+            {:DOWN, ref, :process, _pid, reason} when ref == task.ref ->
+              exit(reason)
+          end
+      end,
+      fn _ -> :ok end
+    )
+  end
+
+  # Decoding the whole sequence again keeps multi-byte characters and
+  # leading-space merges right; emit only what was added.
+  defp new_piece(old, new) do
+    if String.starts_with?(new, old) do
+      binary_part(new, byte_size(old), byte_size(new) - byte_size(old))
+    else
+      ""
+    end
+  end
+
+  defp encode_prompt(tokenizer, opts) do
+    cond do
+      text = Keyword.get(opts, :prompt) ->
+        if tokenizer == nil do
+          raise ArgumentError, "a string :prompt requires load/2 with a `tokenizer:` path"
+        end
+
+        {:ok, encoding} = Tokenizers.Tokenizer.encode(tokenizer, text)
+        {Tokenizers.Encoding.get_ids(encoding), true}
+
+      prompt = Keyword.get(opts, :prompt_tokens) ->
+        {prompt, false}
+
+      true ->
+        raise ArgumentError, "pass :prompt (string) or :prompt_tokens (list)"
     end
   end
 end

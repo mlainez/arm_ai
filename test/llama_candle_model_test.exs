@@ -28,6 +28,15 @@ defmodule ArmAI.LlamaCandleModelTest do
     assert stats.n_new < 48
   end
 
+  test "stream/2 yields the same text as generate/2, piece by piece", %{model: model} do
+    opts = [prompt: @prompt, max_new: 48, stop_tokens: [2]]
+    {reply, _stats} = ArmAI.LlamaCandle.generate(model, opts)
+    pieces = model |> ArmAI.LlamaCandle.stream(opts) |> Enum.to_list()
+
+    assert length(pieces) > 1
+    assert Enum.join(pieces) == reply
+  end
+
   test "max_new: 0 generates nothing", %{model: model} do
     assert {"", %{n_new: 0}} = ArmAI.LlamaCandle.generate(model, prompt: @prompt, max_new: 0)
   end
